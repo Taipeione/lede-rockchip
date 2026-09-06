@@ -1,300 +1,114 @@
-#
-# DoorNet2 OpenWrt + iStore
-# Base source:
-# https://github.com/DHDAXCW/lede-rockchip
-#
-
-name: DoorNet2-OpenWrt-iStore
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build_openwrt:
-
-    name: Build DoorNet2 OpenWrt Firmware
-
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Space cleanup and Initialization environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Configure TF card priority boot
         run: |
-          docker rmi $(docker images -q) 2>/dev/null || true
-          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
-          sudo -E apt-mark hold grub-efi-amd64-signed
-          sudo -E apt update
-
-          sudo -E apt -y purge \
-            azure-cli* \
-            docker* \
-            ghc* \
-            zulu* \
-            llvm* \
-            firefox \
-            google* \
-            dotnet* \
-            powershell* \
-            openjdk* \
-            mysql* \
-            php* \
-            mongodb* \
-            snap* || true
-
-          sudo -E apt -y full-upgrade
-
-          sudo -E apt -y install \
-            ack \
-            antlr3 \
-            asciidoc \
-            autoconf \
-            automake \
-            autopoint \
-            binutils \
-            bison \
-            build-essential \
-            bzip2 \
-            ccache \
-            clang \
-            cmake \
-            cpio \
-            curl \
-            device-tree-compiler \
-            flex \
-            gawk \
-            gcc-multilib \
-            g++-multilib \
-            gettext \
-            genisoimage \
-            git \
-            gperf \
-            haveged \
-            help2man \
-            intltool \
-            libc6-dev-i386 \
-            libelf-dev \
-            libfuse-dev \
-            libglib2.0-dev \
-            libgmp3-dev \
-            libltdl-dev \
-            libmpc-dev \
-            libmpfr-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libpython3-dev \
-            libreadline-dev \
-            libssl-dev \
-            libtool \
-            llvm \
-            lrzsz \
-            msmtp \
-            ninja-build \
-            p7zip \
-            p7zip-full \
-            patch \
-            pkgconf \
-            python3 \
-            python3-pyelftools \
-            python3-setuptools \
-            qemu-utils \
-            rsync \
-            scons \
-            squashfs-tools \
-            subversion \
-            swig \
-            texinfo \
-            uglifyjs \
-            upx-ucl \
-            unzip \
-            vim \
-            wget \
-            xmlto \
-            xxd \
-            zlib1g-dev
-
-          sudo -E systemctl daemon-reload
-          sudo -E apt -y autoremove --purge
-          sudo -E apt clean
-          sudo -E timedatectl set-timezone "Asia/Shanghai"
-
-      - name: Checkout OpenWrt
-        uses: actions/checkout@v4
-
-      - name: Add iStore feed
-        run: |
-          echo "=============================="
-          echo "Add iStore feed"
-          echo "=============================="
-
-          grep -q '^src-git istore ' feeds.conf.default || \
-            echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
-
-          echo "=============================="
-          cat feeds.conf.default
-          echo "=============================="
-
-      - name: Update feeds
-        run: |
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a -f
-
-          ./scripts/feeds install -d y -p istore luci-app-store
-
-      - name: Set default LAN IP
-        run: |
-          LAN_CONFIG="package/base-files/files/bin/config_generate"
-
           echo "========================================"
-          echo "Set DoorNet2 default LAN IP"
-          echo "192.168.1.1 -> 192.168.100.1"
+          echo "Configure DoorNet2 TF-first boot"
+          echo "TF inserted  -> boot completely from TF"
+          echo "TF removed   -> boot from eMMC"
           echo "========================================"
 
-          if [ ! -f "$LAN_CONFIG" ]; then
-            echo "ERROR: Cannot find $LAN_CONFIG"
-            exit 1
-          fi
+          #
+          # 1. Create DoorNet2-specific boot script
+          #
+          cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
+          #
+          # DoorNet2 TF/eMMC smart boot
+          #
+          # U-Boot mmc1 = TF/SD card
+          # Linux mmcblk1 = TF/SD card
+          # Linux mmcblk0 = eMMC
+          #
 
-          echo "Before modification:"
-          grep -n "192\.168\.1\.1" "$LAN_CONFIG" || true
+          if test "${devtype}" = "mmc"; then
+              if test "${devnum}" = "1"; then
+                  echo "========================================";
+                  echo "DoorNet2: TF card detected";
+                  echo "Boot kernel + rootfs completely from TF";
+                  echo "========================================";
+                  setenv rootdev "/dev/mmcblk1p2";
+              else
+                  echo "========================================";
+                  echo "DoorNet2: booting from eMMC";
+                  echo "========================================";
+                  setenv rootdev "/dev/mmcblk0p2";
+              fi;
+          else
+              part uuid ${devtype} ${devnum}:2 uuid;
+              setenv rootdev "PARTUUID=${uuid}";
+          fi;
 
-          if ! grep -q "192\.168\.1\.1" "$LAN_CONFIG"; then
-            echo "ERROR: Default 192.168.1.1 was not found."
-            echo "The upstream source may have changed."
-            exit 1
-          fi
+          if test "${stdout}" = "serial@fe660000"; then
+              setenv serial_addr ",0xfe660000";
+          elif test "${stdout}" = "serial@feb50000"; then
+              setenv serial_addr ",0xfeb50000";
+          elif test "${stdout}" = "serial@ff130000"; then
+              setenv serial_addr ",0xff130000";
+          elif test "${stdout}" = "serial@ff1a0000"; then
+              setenv serial_addr ",0xff1a0000";
+          fi;
 
-          sed -i 's/192\.168\.1\.1/192.168.100.1/g' "$LAN_CONFIG"
+          setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
 
-          echo "After modification:"
-          grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+          load ${devtype} ${devnum}:1 ${kernel_addr_r} kernel.img;
 
-          if ! grep -q "192\.168\.100\.1" "$LAN_CONFIG"; then
-            echo "ERROR: Failed to set LAN IP to 192.168.100.1"
-            exit 1
-          fi
-
-          echo "LAN IP successfully changed to 192.168.100.1"
-
-      - name: Configure DoorNet2 and iStore
-        run: |
-          cat >> .config <<'EOF'
-          CONFIG_TARGET_rockchip=y
-          CONFIG_TARGET_rockchip_armv8=y
-          CONFIG_TARGET_MULTI_PROFILE=y
-
-          CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
-
-          CONFIG_TARGET_KERNEL_PARTSIZE=64
-          CONFIG_TARGET_ROOTFS_PARTSIZE=512
-
-          CONFIG_TARGET_ROOTFS_TARGZ=y
-          CONFIG_TARGET_ROOTFS_EXT4FS=y
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y
-
-          CONFIG_PACKAGE_luci-app-store=y
-          CONFIG_PACKAGE_luci-compat=y
+          bootm ${kernel_addr_r};
           EOF
 
-      - name: Generate configuration file
-        run: |
-          make defconfig
+          #
+          # 2. Tell DoorNet2 image builder to use our custom boot script
+          #
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("target/linux/rockchip/image/armv8.mk")
+          s = p.read_text()
+
+          old = """define Device/embedfire_doornet2
+            DEVICE_VENDOR := EmbedFire
+            DEVICE_MODEL := DoorNet2
+            SOC := rk3399
+            BOOT_FLOW := pine64-bin
+          """
+
+          new = """define Device/embedfire_doornet2
+            DEVICE_VENDOR := EmbedFire
+            DEVICE_MODEL := DoorNet2
+            SOC := rk3399
+            BOOT_FLOW := pine64-bin
+            BOOT_SCRIPT := doornet2
+          """
+
+          if "BOOT_SCRIPT := doornet2" not in s:
+              if old not in s:
+                  raise SystemExit("ERROR: DoorNet2 device block not found")
+              s = s.replace(old, new)
+
+          p.write_text(s)
+          PY
+
+          #
+          # 3. Make U-Boot search TF first, then all possible eMMC MMC slots
+          #
+          mkdir -p package/boot/uboot-rockchip/patches
+
+          cat > package/boot/uboot-rockchip/patches/999-doornet2-tf-first.patch <<'EOF'
+          --- a/include/configs/rockchip-common.h
+          +++ b/include/configs/rockchip-common.h
+          @@ -12,7 +12,7 @@
+           #ifndef CONFIG_SPL_BUILD
+           
+          -#define BOOT_TARGETS	"mmc1 mmc0 nvme scsi usb pxe dhcp spi"
+          +#define BOOT_TARGETS	"mmc1 mmc0 mmc2 nvme scsi usb pxe dhcp spi"
+           #ifdef CONFIG_ARM64
+           #define ROOT_UUID "B921B045-1DF0-41C3-AF44-4C6F280D3FAE;\0"
+           #else
+          EOF
 
           echo "========================================"
-          echo "DoorNet2 target:"
+          echo "Check DoorNet2 configuration"
           echo "========================================"
-          grep -E 'CONFIG_TARGET.*embedfire_doornet2' .config || true
 
-          echo "========================================"
-          echo "iStore:"
-          echo "========================================"
-          grep -E 'CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_luci-compat' .config || true
+          grep -A8 "define Device/embedfire_doornet2" \
+            target/linux/rockchip/image/armv8.mk
 
           echo "========================================"
-          echo "Default LAN IP:"
-          echo "========================================"
-          grep -n "192\.168\.100\.1" package/base-files/files/bin/config_generate
-
-      - name: Download packages
-        run: |
-          make download -j16
-
-          find dl -size -1024c -exec rm -f {} \;
-
-      - name: Compile firmware
-        run: |
-          make -j$(nproc) || make -j1 V=s
-
-          echo "======================="
-          echo "Space usage:"
-          echo "======================="
-          df -h
-
-          echo "======================="
-          echo "Firmware files:"
-          echo "======================="
-          find ./bin/targets/ -type f | sort
-
-      - name: Prepare artifact
-        run: |
-          mkdir -p ./artifact/package
-          mkdir -p ./artifact/buildinfo
-          mkdir -p ./artifact/firmware
-
-          find ./bin/targets/ -type d -name "packages" -prune -exec rm -rf {} +
-
-          find ./bin/packages/ \
-            -type f \
-            -name "*.ipk" \
-            -exec cp -f {} ./artifact/package/ \;
-
-          find ./bin/targets/ \
-            -type f \
-            \( -name "*.buildinfo" -o -name "*.manifest" -o -name "*.config" \) \
-            -exec cp -f {} ./artifact/buildinfo/ \;
-
-          find ./bin/targets/ \
-            -type f \
-            \( \
-              -name "*.img" \
-              -o -name "*.img.gz" \
-              -o -name "*.bin" \
-              -o -name "*.itb" \
-              -o -name "*.gz" \
-            \) \
-            -exec cp -f {} ./artifact/firmware/ \;
-
-          cd ./artifact/firmware
-
-          if [ "$(find . -maxdepth 1 -type f | wc -l)" -gt 0 ]; then
-            sha256sum * > sha256sums.txt
-          fi
-
-          echo "========================================"
-          echo "Firmware artifact:"
-          echo "========================================"
-          ls -lah
-
-      - name: Upload buildinfo
-        uses: actions/upload-artifact@v4
-        with:
-          name: DoorNet2_buildinfo
-          path: ./artifact/buildinfo/
-          retention-days: 30
-
-      - name: Upload package
-        uses: actions/upload-artifact@v4
-        with:
-          name: DoorNet2_packages
-          path: ./artifact/package/
-          retention-days: 30
-
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: DoorNet2_firmware
-          path: ./artifact/firmware/
-          retention-days: 30
+          cat target/linux/rockchip/image/doornet2.bootscript
