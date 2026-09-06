@@ -144,6 +144,41 @@ jobs:
 
           ./scripts/feeds install -d y -p istore luci-app-store
 
+      - name: Set default LAN IP
+        run: |
+          LAN_CONFIG="package/base-files/files/bin/config_generate"
+
+          echo "========================================"
+          echo "Set DoorNet2 default LAN IP"
+          echo "192.168.1.1 -> 192.168.100.1"
+          echo "========================================"
+
+          if [ ! -f "$LAN_CONFIG" ]; then
+            echo "ERROR: Cannot find $LAN_CONFIG"
+            exit 1
+          fi
+
+          echo "Before modification:"
+          grep -n "192\.168\.1\.1" "$LAN_CONFIG" || true
+
+          if ! grep -q "192\.168\.1\.1" "$LAN_CONFIG"; then
+            echo "ERROR: Default 192.168.1.1 was not found."
+            echo "The upstream source may have changed."
+            exit 1
+          fi
+
+          sed -i 's/192\.168\.1\.1/192.168.100.1/g' "$LAN_CONFIG"
+
+          echo "After modification:"
+          grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+
+          if ! grep -q "192\.168\.100\.1" "$LAN_CONFIG"; then
+            echo "ERROR: Failed to set LAN IP to 192.168.100.1"
+            exit 1
+          fi
+
+          echo "LAN IP successfully changed to 192.168.100.1"
+
       - name: Configure DoorNet2 and iStore
         run: |
           cat >> .config <<'EOF'
@@ -177,6 +212,11 @@ jobs:
           echo "iStore:"
           echo "========================================"
           grep -E 'CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_luci-compat' .config || true
+
+          echo "========================================"
+          echo "Default LAN IP:"
+          echo "========================================"
+          grep -n "192\.168\.100\.1" package/base-files/files/bin/config_generate
 
       - name: Download packages
         run: |
