@@ -3,13 +3,15 @@
 #
 # Features:
 # - LAN IP: 192.168.100.1
-# - 4GB base ext4 rootfs
-# - Auto expand rootfs to full TF/eMMC capacity
+# - 7GB ext4 rootfs
 # - TF/SD priority boot
 # - No TF -> fallback to eMMC
 # - iStore
 # - Disk management utilities
 # - taskd compatibility fix
+#
+# Base source:
+# https://github.com/DHDAXCW/lede-rockchip
 #
 
 name: DoorNet2-OpenWrt-iStore
@@ -158,7 +160,6 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a -f
-
           ./scripts/feeds install -d y -p istore luci-app-store
 
 
@@ -300,9 +301,7 @@ jobs:
           start = new_text.find(start_marker)
           end = new_text.find("endef", start)
 
-          print(
-              new_text[start:end + len("endef")]
-          )
+          print(new_text[start:end + len("endef")])
           PY
 
           if ! grep -A8 \
@@ -360,150 +359,7 @@ jobs:
           exit 0
           EOF
 
-          chmod 755 \
-            files/etc/uci-defaults/99-taskd-compat
-
-
-      - name: Add automatic rootfs expansion
-        run: |
-          echo "========================================"
-          echo "Add automatic rootfs expansion"
-          echo "TF card -> expand to full TF capacity"
-          echo "eMMC    -> expand to full eMMC capacity"
-          echo "========================================"
-
-          mkdir -p files/etc/uci-defaults
-
-          #
-          # Stage 1
-          # Expand partition 2 to the end of the boot disk.
-          #
-          # A temporary /tmp marker prevents stage 2 from running
-          # during the same boot before the kernel rereads the
-          # new partition table.
-          #
-
-          cat > files/etc/uci-defaults/70-rootpt-resize <<'EOF'
-          #!/bin/sh
-
-          DONE="/etc/rootpt-resize.done"
-          REBOOTING="/tmp/rootpt-resize-pending-reboot"
-
-          if [ -e "$DONE" ]; then
-              exit 0
-          fi
-
-          ROOT_DEV="$(sed -n 's/.* root=\([^ ]*\).*/\1/p' /proc/cmdline)"
-
-          case "$ROOT_DEV" in
-              /dev/mmcblk0p2|/dev/mmcblk1p2)
-                  ;;
-              *)
-                  logger -t root-resize \
-                    "Unsupported root device: $ROOT_DEV"
-                  exit 0
-                  ;;
-          esac
-
-          ROOT_DISK="${ROOT_DEV%p2}"
-
-          logger -t root-resize \
-            "Stage 1: expanding partition 2 on $ROOT_DISK"
-
-          if ! parted -s "$ROOT_DISK" resizepart 2 100%; then
-              logger -t root-resize \
-                "Stage 1 failed: partition resize failed"
-              exit 1
-          fi
-
-          touch "$DONE"
-          touch "$REBOOTING"
-
-          sync
-
-          logger -t root-resize \
-            "Stage 1 completed. Reboot required."
-
-          (
-              sleep 2
-              reboot
-          ) &
-
-          exit 1
-          EOF
-
-          chmod 755 \
-            files/etc/uci-defaults/70-rootpt-resize
-
-
-          #
-          # Stage 2
-          # After reboot, grow the ext4 filesystem.
-          #
-
-          cat > files/etc/uci-defaults/80-rootfs-resize <<'EOF'
-          #!/bin/sh
-
-          PART_DONE="/etc/rootpt-resize.done"
-          FS_DONE="/etc/rootfs-resize.done"
-          REBOOTING="/tmp/rootpt-resize-pending-reboot"
-
-          #
-          # Stage 1 was just executed during this boot.
-          # Do not resize the filesystem until after reboot.
-          #
-          if [ -e "$REBOOTING" ]; then
-              exit 1
-          fi
-
-          if [ -e "$FS_DONE" ]; then
-              exit 0
-          fi
-
-          if [ ! -e "$PART_DONE" ]; then
-              exit 1
-          fi
-
-          ROOT_DEV="$(sed -n 's/.* root=\([^ ]*\).*/\1/p' /proc/cmdline)"
-
-          case "$ROOT_DEV" in
-              /dev/mmcblk0p2|/dev/mmcblk1p2)
-                  ;;
-              *)
-                  logger -t root-resize \
-                    "Unsupported root device: $ROOT_DEV"
-                  exit 0
-                  ;;
-          esac
-
-          logger -t root-resize \
-            "Stage 2: expanding ext4 filesystem on $ROOT_DEV"
-
-          if ! resize2fs -f "$ROOT_DEV"; then
-              logger -t root-resize \
-                "Stage 2 failed: resize2fs failed"
-              exit 1
-          fi
-
-          touch "$FS_DONE"
-
-          sync
-
-          logger -t root-resize \
-            "Stage 2 completed. Root filesystem expanded."
-
-          (
-              sleep 2
-              reboot
-          ) &
-
-          exit 1
-          EOF
-
-          chmod 755 \
-            files/etc/uci-defaults/80-rootfs-resize
-
-          echo "Automatic rootfs expansion scripts created"
+          chmod 755 files/etc/uci-defaults/99-taskd-compat
 
 
       - name: Configure DoorNet2 and packages
@@ -517,10 +373,13 @@ jobs:
           CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
 
           #
-          # Base partition size
+          # Partition size
+          #
+          # 64MB kernel
+          # 7168MB = 7GB rootfs
           #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
-          CONFIG_TARGET_ROOTFS_PARTSIZE=4096
+          CONFIG_TARGET_ROOTFS_PARTSIZE=7168
 
           CONFIG_TARGET_ROOTFS_TARGZ=y
           CONFIG_TARGET_ROOTFS_EXT4FS=y
@@ -531,11 +390,6 @@ jobs:
           #
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
-
-          #
-          # Partition management
-          #
-          CONFIG_PACKAGE_parted=y
 
           #
           # Block / disk tools
@@ -577,7 +431,7 @@ jobs:
             .config || true
 
           echo "========================================"
-          echo "Base RootFS size"
+          echo "RootFS size"
           echo "========================================"
 
           grep \
@@ -597,7 +451,7 @@ jobs:
           echo "========================================"
 
           grep -E \
-            'CONFIG_PACKAGE_(parted|lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
+            'CONFIG_PACKAGE_(lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
             .config || true
 
           echo "========================================"
@@ -615,14 +469,6 @@ jobs:
           grep -A8 \
             "define Device/embedfire_doornet2" \
             target/linux/rockchip/image/armv8.mk
-
-          echo "========================================"
-          echo "Auto resize scripts"
-          echo "========================================"
-
-          ls -l \
-            files/etc/uci-defaults/70-rootpt-resize \
-            files/etc/uci-defaults/80-rootfs-resize
 
 
       - name: Download packages
