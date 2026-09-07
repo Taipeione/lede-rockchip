@@ -3,10 +3,12 @@
 #
 # Features:
 # - LAN IP: 192.168.100.1
+# - WAN: eth0 DHCP
 # - 7GB ext4 rootfs
 # - TF/SD priority boot
 # - No TF -> fallback to eMMC
 # - iStore
+# - Self-hosted OPKG feed on GitHub
 # - Disk management utilities
 # - taskd compatibility fix
 #
@@ -19,8 +21,12 @@ name: DoorNet2-OpenWrt-iStore
 on:
   workflow_dispatch:
 
+#
+# IMPORTANT:
+# write permission is required to publish opkg-feed branch
+#
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build_openwrt:
@@ -192,6 +198,61 @@ jobs:
 
           echo "LAN IP successfully changed:"
           grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+
+
+      - name: Configure default WAN
+        run: |
+          echo "========================================"
+          echo "Configure WAN"
+          echo "WAN device: eth0"
+          echo "WAN protocol: DHCP"
+          echo "========================================"
+
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/96-doornet2-wan <<'EOF'
+          #!/bin/sh
+
+          uci -q set network.wan='interface'
+          uci -q set network.wan.device='eth0'
+          uci -q set network.wan.proto='dhcp'
+
+          uci -q commit network
+
+          logger -t doornet2 \
+            "Default WAN configured: eth0 DHCP"
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/96-doornet2-wan
+
+
+      - name: Configure GitHub OPKG feed
+        run: |
+          echo "========================================"
+          echo "Configure self-hosted OPKG feed"
+          echo "Repository: Taipeione/lede-rockchip"
+          echo "Branch: opkg-feed"
+          echo "========================================"
+
+          mkdir -p files/etc/opkg
+
+          cat > files/etc/opkg/distfeeds.conf <<'EOF'
+          src/gz openwrt_core https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/targets/rockchip/armv8/packages
+          src/gz openwrt_base https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/base
+          src/gz openwrt_istore https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/istore
+          src/gz openwrt_luci https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/luci
+          src/gz openwrt_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/packages
+          src/gz openwrt_routing https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/routing
+          src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
+          EOF
+
+          echo "========================================"
+          echo "DoorNet2 distfeeds.conf"
+          echo "========================================"
+
+          cat files/etc/opkg/distfeeds.conf
 
 
       - name: Configure TF card priority boot
@@ -463,6 +524,12 @@ jobs:
             package/base-files/files/bin/config_generate
 
           echo "========================================"
+          echo "OPKG feeds"
+          echo "========================================"
+
+          cat files/etc/opkg/distfeeds.conf
+
+          echo "========================================"
           echo "Boot mode"
           echo "========================================"
 
@@ -505,12 +572,6 @@ jobs:
           mkdir -p ./artifact/buildinfo
           mkdir -p ./artifact/firmware
 
-          find ./bin/targets/ \
-            -type d \
-            -name "packages" \
-            -prune \
-            -exec rm -rf {} +
-
           find ./bin/packages/ \
             -type f \
             -name "*.ipk" \
@@ -534,6 +595,7 @@ jobs:
               -o -name "*.itb" \
               -o -name "*.gz" \
             \) \
+            ! -path "*/packages/*" \
             -exec cp -f {} ./artifact/firmware/ \;
 
           cd ./artifact/firmware
@@ -547,6 +609,94 @@ jobs:
           echo "========================================"
 
           ls -lah
+
+
+      - name: Prepare OPKG feed
+        run: |
+          echo "========================================"
+          echo "Prepare GitHub OPKG feed"
+          echo "========================================"
+
+          rm -rf ./artifact/opkg-feed
+
+          mkdir -p \
+            ./artifact/opkg-feed/packages \
+            ./artifact/opkg-feed/targets/rockchip/armv8
+
+          #
+          # Copy normal package feeds
+          #
+          cp -a \
+            ./bin/packages/. \
+            ./artifact/opkg-feed/packages/
+
+          #
+          # Copy target/kernel packages
+          #
+          if [ -d "./bin/targets/rockchip/armv8/packages" ]; then
+
+            cp -a \
+              ./bin/targets/rockchip/armv8/packages \
+              ./artifact/opkg-feed/targets/rockchip/armv8/
+
+          else
+
+            echo "ERROR: target packages directory not found"
+            exit 1
+
+          fi
+
+          #
+          # Feed information
+          #
+          cat > ./artifact/opkg-feed/README.md <<EOF
+          # DoorNet2 OPKG Feed
+
+          Repository:
+          Taipeione/lede-rockchip
+
+          Target:
+          rockchip/armv8
+
+          Architecture:
+          aarch64_generic
+
+          Git commit:
+          ${GITHUB_SHA}
+
+          Build:
+          ${GITHUB_RUN_NUMBER}
+          EOF
+
+          echo "========================================"
+          echo "Packages.gz files"
+          echo "========================================"
+
+          find ./artifact/opkg-feed \
+            -type f \
+            -name "Packages.gz" \
+            -print \
+            | sort
+
+          PACKAGE_INDEX_COUNT="$(
+            find ./artifact/opkg-feed \
+              -type f \
+              -name "Packages.gz" \
+              | wc -l
+          )"
+
+          echo "Found ${PACKAGE_INDEX_COUNT} package indexes"
+
+          if [ "$PACKAGE_INDEX_COUNT" -lt 2 ]; then
+            echo "ERROR: Package indexes were not generated"
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "Feed size"
+          echo "========================================"
+
+          du -sh ./artifact/opkg-feed
 
 
       - name: Upload buildinfo
@@ -571,3 +721,58 @@ jobs:
           name: DoorNet2_firmware
           path: ./artifact/firmware/
           retention-days: 30
+
+
+      - name: Upload OPKG feed backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2_opkg_feed
+          path: ./artifact/opkg-feed/
+          retention-days: 30
+
+
+      - name: Publish OPKG feed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "========================================"
+          echo "Publish OPKG feed"
+          echo "Branch: opkg-feed"
+          echo "========================================"
+
+          rm -rf /tmp/doornet2-opkg-feed
+
+          git clone \
+            --depth 1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            /tmp/doornet2-opkg-feed
+
+          cd /tmp/doornet2-opkg-feed
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout --orphan opkg-feed-new
+
+          git rm -rf . >/dev/null 2>&1 || true
+
+          cp -a \
+            "${GITHUB_WORKSPACE}/artifact/opkg-feed/." \
+            .
+
+          git add -A
+
+          git commit \
+            -m "Update DoorNet2 OPKG feed - run ${GITHUB_RUN_NUMBER}"
+
+          git branch -M opkg-feed
+
+          git push \
+            --force \
+            origin \
+            opkg-feed
+
+          echo "========================================"
+          echo "OPKG feed published successfully"
+          echo "========================================"
