@@ -3,7 +3,8 @@
 #
 # Features:
 # - LAN IP: 192.168.100.1
-# - 4GB ext4 rootfs
+# - 4GB base ext4 rootfs
+# - Auto expand rootfs to full TF/eMMC capacity
 # - TF/SD priority boot
 # - No TF -> fallback to eMMC
 # - iStore
@@ -27,6 +28,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
       - name: Space cleanup and Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -135,8 +137,10 @@ jobs:
           sudo -E apt clean
           sudo -E timedatectl set-timezone "Asia/Shanghai"
 
+
       - name: Checkout OpenWrt
         uses: actions/checkout@v4
+
 
       - name: Add iStore feed
         run: |
@@ -149,12 +153,14 @@ jobs:
 
           cat feeds.conf.default
 
+
       - name: Update feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a -f
 
           ./scripts/feeds install -d y -p istore luci-app-store
+
 
       - name: Set default LAN IP
         run: |
@@ -185,6 +191,7 @@ jobs:
 
           echo "LAN IP successfully changed:"
           grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+
 
       - name: Configure TF card priority boot
         run: |
@@ -309,6 +316,7 @@ jobs:
 
           echo "TF/eMMC smart boot configuration OK"
 
+
       - name: Add taskd compatibility fix
         run: |
           echo "========================================"
@@ -355,6 +363,149 @@ jobs:
           chmod 755 \
             files/etc/uci-defaults/99-taskd-compat
 
+
+      - name: Add automatic rootfs expansion
+        run: |
+          echo "========================================"
+          echo "Add automatic rootfs expansion"
+          echo "TF card -> expand to full TF capacity"
+          echo "eMMC    -> expand to full eMMC capacity"
+          echo "========================================"
+
+          mkdir -p files/etc/uci-defaults
+
+          #
+          # Stage 1
+          # Expand partition 2 to the end of the boot disk.
+          #
+          # A temporary /tmp marker prevents stage 2 from running
+          # during the same boot before the kernel rereads the
+          # new partition table.
+          #
+
+          cat > files/etc/uci-defaults/70-rootpt-resize <<'EOF'
+          #!/bin/sh
+
+          DONE="/etc/rootpt-resize.done"
+          REBOOTING="/tmp/rootpt-resize-pending-reboot"
+
+          if [ -e "$DONE" ]; then
+              exit 0
+          fi
+
+          ROOT_DEV="$(sed -n 's/.* root=\([^ ]*\).*/\1/p' /proc/cmdline)"
+
+          case "$ROOT_DEV" in
+              /dev/mmcblk0p2|/dev/mmcblk1p2)
+                  ;;
+              *)
+                  logger -t root-resize \
+                    "Unsupported root device: $ROOT_DEV"
+                  exit 0
+                  ;;
+          esac
+
+          ROOT_DISK="${ROOT_DEV%p2}"
+
+          logger -t root-resize \
+            "Stage 1: expanding partition 2 on $ROOT_DISK"
+
+          if ! parted -s "$ROOT_DISK" resizepart 2 100%; then
+              logger -t root-resize \
+                "Stage 1 failed: partition resize failed"
+              exit 1
+          fi
+
+          touch "$DONE"
+          touch "$REBOOTING"
+
+          sync
+
+          logger -t root-resize \
+            "Stage 1 completed. Reboot required."
+
+          (
+              sleep 2
+              reboot
+          ) &
+
+          exit 1
+          EOF
+
+          chmod 755 \
+            files/etc/uci-defaults/70-rootpt-resize
+
+
+          #
+          # Stage 2
+          # After reboot, grow the ext4 filesystem.
+          #
+
+          cat > files/etc/uci-defaults/80-rootfs-resize <<'EOF'
+          #!/bin/sh
+
+          PART_DONE="/etc/rootpt-resize.done"
+          FS_DONE="/etc/rootfs-resize.done"
+          REBOOTING="/tmp/rootpt-resize-pending-reboot"
+
+          #
+          # Stage 1 was just executed during this boot.
+          # Do not resize the filesystem until after reboot.
+          #
+          if [ -e "$REBOOTING" ]; then
+              exit 1
+          fi
+
+          if [ -e "$FS_DONE" ]; then
+              exit 0
+          fi
+
+          if [ ! -e "$PART_DONE" ]; then
+              exit 1
+          fi
+
+          ROOT_DEV="$(sed -n 's/.* root=\([^ ]*\).*/\1/p' /proc/cmdline)"
+
+          case "$ROOT_DEV" in
+              /dev/mmcblk0p2|/dev/mmcblk1p2)
+                  ;;
+              *)
+                  logger -t root-resize \
+                    "Unsupported root device: $ROOT_DEV"
+                  exit 0
+                  ;;
+          esac
+
+          logger -t root-resize \
+            "Stage 2: expanding ext4 filesystem on $ROOT_DEV"
+
+          if ! resize2fs -f "$ROOT_DEV"; then
+              logger -t root-resize \
+                "Stage 2 failed: resize2fs failed"
+              exit 1
+          fi
+
+          touch "$FS_DONE"
+
+          sync
+
+          logger -t root-resize \
+            "Stage 2 completed. Root filesystem expanded."
+
+          (
+              sleep 2
+              reboot
+          ) &
+
+          exit 1
+          EOF
+
+          chmod 755 \
+            files/etc/uci-defaults/80-rootfs-resize
+
+          echo "Automatic rootfs expansion scripts created"
+
+
       - name: Configure DoorNet2 and packages
         run: |
           cat >> .config <<'EOF'
@@ -366,7 +517,7 @@ jobs:
           CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
 
           #
-          # Partition size
+          # Base partition size
           #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=4096
@@ -380,6 +531,11 @@ jobs:
           #
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
+
+          #
+          # Partition management
+          #
+          CONFIG_PACKAGE_parted=y
 
           #
           # Block / disk tools
@@ -407,6 +563,7 @@ jobs:
 
           EOF
 
+
       - name: Generate configuration file
         run: |
           make defconfig
@@ -420,7 +577,7 @@ jobs:
             .config || true
 
           echo "========================================"
-          echo "RootFS size"
+          echo "Base RootFS size"
           echo "========================================"
 
           grep \
@@ -440,7 +597,7 @@ jobs:
           echo "========================================"
 
           grep -E \
-            'CONFIG_PACKAGE_(lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
+            'CONFIG_PACKAGE_(parted|lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
             .config || true
 
           echo "========================================"
@@ -459,6 +616,15 @@ jobs:
             "define Device/embedfire_doornet2" \
             target/linux/rockchip/image/armv8.mk
 
+          echo "========================================"
+          echo "Auto resize scripts"
+          echo "========================================"
+
+          ls -l \
+            files/etc/uci-defaults/70-rootpt-resize \
+            files/etc/uci-defaults/80-rootfs-resize
+
+
       - name: Download packages
         run: |
           make download -j16
@@ -466,6 +632,7 @@ jobs:
           find dl \
             -size -1024c \
             -exec rm -f {} \;
+
 
       - name: Compile firmware
         run: |
@@ -484,6 +651,7 @@ jobs:
           find ./bin/targets/ \
             -type f \
             | sort
+
 
       - name: Prepare artifact
         run: |
@@ -534,6 +702,7 @@ jobs:
 
           ls -lah
 
+
       - name: Upload buildinfo
         uses: actions/upload-artifact@v4
         with:
@@ -541,12 +710,14 @@ jobs:
           path: ./artifact/buildinfo/
           retention-days: 30
 
+
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: DoorNet2_packages
           path: ./artifact/package/
           retention-days: 30
+
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
