@@ -9,6 +9,8 @@
 # - No TF -> fallback to eMMC
 # - iStore
 # - Self-hosted OPKG feed on GitHub
+# - GitHub Releases firmware publishing
+# - SHA256 verification metadata
 # - Disk management utilities
 # - taskd compatibility fix
 #
@@ -21,10 +23,6 @@ name: DoorNet2-OpenWrt-iStore
 on:
   workflow_dispatch:
 
-#
-# IMPORTANT:
-# write permission is required to publish opkg-feed branch
-#
 permissions:
   contents: write
 
@@ -150,6 +148,27 @@ jobs:
         uses: actions/checkout@v4
 
 
+      - name: Generate build version
+        run: |
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          BUILD_DAY="$(date -u +'%Y.%m.%d')"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          VERSION="${BUILD_DAY}-r${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          TAG="doornet2-${VERSION}"
+
+          echo "DOORNET2_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "DOORNET2_TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "DOORNET2_BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
+
+          echo "========================================"
+          echo "DoorNet2 version"
+          echo "========================================"
+          echo "Version: ${VERSION}"
+          echo "Tag:     ${TAG}"
+          echo "Date:    ${BUILD_DATE}"
+
+
       - name: Add iStore feed
         run: |
           echo "========================================"
@@ -232,8 +251,6 @@ jobs:
         run: |
           echo "========================================"
           echo "Configure self-hosted OPKG feed"
-          echo "Repository: Taipeione/lede-rockchip"
-          echo "Branch: opkg-feed"
           echo "========================================"
 
           mkdir -p files/etc/opkg
@@ -248,11 +265,27 @@ jobs:
           src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
           EOF
 
+          cat files/etc/opkg/distfeeds.conf
+
+
+      - name: Embed DoorNet2 version
+        run: |
           echo "========================================"
-          echo "DoorNet2 distfeeds.conf"
+          echo "Embed DoorNet2 build information"
           echo "========================================"
 
-          cat files/etc/opkg/distfeeds.conf
+          mkdir -p files/etc
+
+          cat > files/etc/doornet2_release <<EOF
+          DOORNET2_VERSION='${DOORNET2_VERSION}'
+          DOORNET2_TAG='${DOORNET2_TAG}'
+          DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
+          DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
+          DOORNET2_GITHUB_REPOSITORY='${GITHUB_REPOSITORY}'
+          DOORNET2_BOARD='embedfire,doornet2'
+          EOF
+
+          cat files/etc/doornet2_release
 
 
       - name: Configure TF card priority boot
@@ -374,15 +407,9 @@ jobs:
             exit 1
           fi
 
-          echo "TF/eMMC smart boot configuration OK"
-
 
       - name: Add taskd compatibility fix
         run: |
-          echo "========================================"
-          echo "Add iStore/taskd compatibility fix"
-          echo "========================================"
-
           mkdir -p files/etc/uci-defaults
 
           cat > files/etc/uci-defaults/99-taskd-compat <<'EOF'
@@ -436,9 +463,6 @@ jobs:
           #
           # Partition size
           #
-          # 64MB kernel
-          # 7168MB = 7GB rootfs
-          #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=7168
 
@@ -451,6 +475,14 @@ jobs:
           #
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
+
+          #
+          # Online update support
+          #
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_ca-certificates=y
+          CONFIG_PACKAGE_jsonfilter=y
 
           #
           # Block / disk tools
@@ -508,11 +540,11 @@ jobs:
             .config || true
 
           echo "========================================"
-          echo "Storage tools"
+          echo "Online update support"
           echo "========================================"
 
           grep -E \
-            'CONFIG_PACKAGE_(lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
+            'CONFIG_PACKAGE_(curl|ca-bundle|ca-certificates|jsonfilter)' \
             .config || true
 
           echo "========================================"
@@ -528,14 +560,6 @@ jobs:
           echo "========================================"
 
           cat files/etc/opkg/distfeeds.conf
-
-          echo "========================================"
-          echo "Boot mode"
-          echo "========================================"
-
-          grep -A8 \
-            "define Device/embedfire_doornet2" \
-            target/linux/rockchip/image/armv8.mk
 
 
       - name: Download packages
@@ -571,6 +595,7 @@ jobs:
           mkdir -p ./artifact/package
           mkdir -p ./artifact/buildinfo
           mkdir -p ./artifact/firmware
+          mkdir -p ./artifact/release
 
           find ./bin/packages/ \
             -type f \
@@ -598,17 +623,87 @@ jobs:
             ! -path "*/packages/*" \
             -exec cp -f {} ./artifact/firmware/ \;
 
-          cd ./artifact/firmware
+          SOURCE_FW="$(
+            find ./bin/targets/rockchip/armv8 \
+              -maxdepth 1 \
+              -type f \
+              -name '*embedfire_doornet2-ext4-sysupgrade.img.gz' \
+              | head -n 1
+          )"
 
-          if [ "$(find . -maxdepth 1 -type f | wc -l)" -gt 0 ]; then
-              sha256sum * > sha256sums.txt
+          if [ -z "$SOURCE_FW" ]; then
+            echo "ERROR: DoorNet2 ext4 sysupgrade firmware not found"
+            exit 1
           fi
 
+          echo "Release firmware source:"
+          echo "$SOURCE_FW"
+
+          cp -f \
+            "$SOURCE_FW" \
+            ./artifact/release/DoorNet2-ext4-sysupgrade.img.gz
+
+          cd ./artifact/release
+
+          SHA256="$(
+            sha256sum DoorNet2-ext4-sysupgrade.img.gz \
+              | awk '{print $1}'
+          )"
+
+          echo "${SHA256}  DoorNet2-ext4-sysupgrade.img.gz" \
+            > sha256sums.txt
+
+          cat > version.json <<EOF
+          {
+            "board": "embedfire,doornet2",
+            "version": "${DOORNET2_VERSION}",
+            "tag": "${DOORNET2_TAG}",
+            "build_date": "${DOORNET2_BUILD_DATE}",
+            "commit": "${GITHUB_SHA}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "asset": "DoorNet2-ext4-sysupgrade.img.gz",
+            "sha256": "${SHA256}"
+          }
+          EOF
+
+          cat > release-notes.md <<EOF
+          # DoorNet2 OpenWrt ${DOORNET2_VERSION}
+
+          Build information:
+
+          - Board: EmbedFire DoorNet2
+          - Target: rockchip/armv8
+          - Version: ${DOORNET2_VERSION}
+          - Git commit: ${GITHUB_SHA}
+          - GitHub Actions run: ${GITHUB_RUN_NUMBER}
+          - Build date: ${DOORNET2_BUILD_DATE}
+
+          Main configuration:
+
+          - LAN: 192.168.100.1
+          - WAN: eth0 DHCP
+          - RootFS: 7GB ext4
+          - TF inserted: boot completely from TF
+          - TF removed: boot from eMMC
+          - iStore included
+          - Self-hosted matching OPKG feed
+
+          Release firmware:
+
+          DoorNet2-ext4-sysupgrade.img.gz
+
+          SHA256:
+
+          ${SHA256}
+          EOF
+
           echo "========================================"
-          echo "Firmware artifact"
+          echo "Release files"
           echo "========================================"
 
           ls -lah
+
+          cat version.json
 
 
       - name: Prepare OPKG feed
@@ -623,16 +718,10 @@ jobs:
             ./artifact/opkg-feed/packages \
             ./artifact/opkg-feed/targets/rockchip/armv8
 
-          #
-          # Copy normal package feeds
-          #
           cp -a \
             ./bin/packages/. \
             ./artifact/opkg-feed/packages/
 
-          #
-          # Copy target/kernel packages
-          #
           if [ -d "./bin/targets/rockchip/armv8/packages" ]; then
 
             cp -a \
@@ -646,14 +735,11 @@ jobs:
 
           fi
 
-          #
-          # Feed information
-          #
           cat > ./artifact/opkg-feed/README.md <<EOF
           # DoorNet2 OPKG Feed
 
           Repository:
-          Taipeione/lede-rockchip
+          ${GITHUB_REPOSITORY}
 
           Target:
           rockchip/armv8
@@ -661,22 +747,15 @@ jobs:
           Architecture:
           aarch64_generic
 
+          Firmware version:
+          ${DOORNET2_VERSION}
+
           Git commit:
           ${GITHUB_SHA}
 
           Build:
           ${GITHUB_RUN_NUMBER}
           EOF
-
-          echo "========================================"
-          echo "Packages.gz files"
-          echo "========================================"
-
-          find ./artifact/opkg-feed \
-            -type f \
-            -name "Packages.gz" \
-            -print \
-            | sort
 
           PACKAGE_INDEX_COUNT="$(
             find ./artifact/opkg-feed \
@@ -691,10 +770,6 @@ jobs:
             echo "ERROR: Package indexes were not generated"
             exit 1
           fi
-
-          echo "========================================"
-          echo "Feed size"
-          echo "========================================"
 
           du -sh ./artifact/opkg-feed
 
@@ -723,6 +798,14 @@ jobs:
           retention-days: 30
 
 
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoorNet2_release
+          path: ./artifact/release/
+          retention-days: 30
+
+
       - name: Upload OPKG feed backup
         uses: actions/upload-artifact@v4
         with:
@@ -737,7 +820,6 @@ jobs:
         run: |
           echo "========================================"
           echo "Publish OPKG feed"
-          echo "Branch: opkg-feed"
           echo "========================================"
 
           rm -rf /tmp/doornet2-opkg-feed
@@ -764,7 +846,7 @@ jobs:
           git add -A
 
           git commit \
-            -m "Update DoorNet2 OPKG feed - run ${GITHUB_RUN_NUMBER}"
+            -m "Update DoorNet2 OPKG feed ${DOORNET2_VERSION}"
 
           git branch -M opkg-feed
 
@@ -773,6 +855,35 @@ jobs:
             origin \
             opkg-feed
 
-          echo "========================================"
           echo "OPKG feed published successfully"
+
+
+      - name: Publish firmware release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           echo "========================================"
+          echo "Publish DoorNet2 GitHub Release"
+          echo "========================================"
+
+          echo "Tag:"
+          echo "${DOORNET2_TAG}"
+
+          gh release create \
+            "${DOORNET2_TAG}" \
+            "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
+            "${GITHUB_WORKSPACE}/artifact/release/sha256sums.txt" \
+            "${GITHUB_WORKSPACE}/artifact/release/version.json" \
+            "${GITHUB_WORKSPACE}/artifact/release/release-notes.md" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "DoorNet2 ${DOORNET2_VERSION}" \
+            --notes-file "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+
+          echo "========================================"
+          echo "Firmware release published successfully"
+          echo "========================================"
+
+          gh release view \
+            "${DOORNET2_TAG}" \
+            --repo "${GITHUB_REPOSITORY}"
