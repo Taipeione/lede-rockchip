@@ -8,14 +8,13 @@
 # - TF/SD priority boot
 # - No TF -> fallback to eMMC
 # - iStore
-# - Self-hosted OPKG feed on GitHub
-# - GitHub Releases firmware publishing
-# - SHA256 verification metadata
+# - Self-hosted OPKG feed
+# - GitHub Releases
+# - LuCI online firmware updater
+# - SHA256 verification
+# - sysupgrade compatibility test
 # - Disk management utilities
 # - taskd compatibility fix
-#
-# Base source:
-# https://github.com/DHDAXCW/lede-rockchip
 #
 
 name: DoorNet2-OpenWrt-iStore
@@ -171,14 +170,8 @@ jobs:
 
       - name: Add iStore feed
         run: |
-          echo "========================================"
-          echo "Add iStore feed"
-          echo "========================================"
-
           grep -q '^src-git istore ' feeds.conf.default || \
             echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
-
-          cat feeds.conf.default
 
 
       - name: Update feeds
@@ -191,10 +184,6 @@ jobs:
       - name: Set default LAN IP
         run: |
           LAN_CONFIG="package/base-files/files/bin/config_generate"
-
-          echo "========================================"
-          echo "Set LAN IP to 192.168.100.1"
-          echo "========================================"
 
           if [ ! -f "$LAN_CONFIG" ]; then
             echo "ERROR: Cannot find $LAN_CONFIG"
@@ -210,23 +199,11 @@ jobs:
             's/192\.168\.1\.1/192.168.100.1/g' \
             "$LAN_CONFIG"
 
-          if ! grep -q "192\.168\.100\.1" "$LAN_CONFIG"; then
-            echo "ERROR: LAN IP modification failed"
-            exit 1
-          fi
-
-          echo "LAN IP successfully changed:"
-          grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+          grep -q "192\.168\.100\.1" "$LAN_CONFIG" || exit 1
 
 
       - name: Configure default WAN
         run: |
-          echo "========================================"
-          echo "Configure WAN"
-          echo "WAN device: eth0"
-          echo "WAN protocol: DHCP"
-          echo "========================================"
-
           mkdir -p files/etc/uci-defaults
 
           cat > files/etc/uci-defaults/96-doornet2-wan <<'EOF'
@@ -249,10 +226,6 @@ jobs:
 
       - name: Configure GitHub OPKG feed
         run: |
-          echo "========================================"
-          echo "Configure self-hosted OPKG feed"
-          echo "========================================"
-
           mkdir -p files/etc/opkg
 
           cat > files/etc/opkg/distfeeds.conf <<'EOF'
@@ -265,15 +238,9 @@ jobs:
           src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
           EOF
 
-          cat files/etc/opkg/distfeeds.conf
-
 
       - name: Embed DoorNet2 version
         run: |
-          echo "========================================"
-          echo "Embed DoorNet2 build information"
-          echo "========================================"
-
           mkdir -p files/etc
 
           cat > files/etc/doornet2_release <<EOF
@@ -285,28 +252,1001 @@ jobs:
           DOORNET2_BOARD='embedfire,doornet2'
           EOF
 
-          cat files/etc/doornet2_release
+
+      - name: Add DoorNet2 online updater
+        run: |
+          echo "========================================"
+          echo "Add DoorNet2 LuCI Online Updater"
+          echo "========================================"
+
+          mkdir -p files/usr/bin
+          mkdir -p files/usr/lib/lua/luci/controller
+          mkdir -p files/usr/lib/lua/luci/view/doornet2
+
+          #
+          # Backend updater
+          #
+          cat > files/usr/bin/doornet2-updater <<'EOF'
+          #!/bin/sh
+
+          REPO="Taipeione/lede-rockchip"
+          BASE_URL="https://github.com/${REPO}/releases/latest/download"
+
+          WORKDIR="/tmp/doornet2-update"
+          META="${WORKDIR}/version.json"
+          FIRMWARE="${WORKDIR}/DoorNet2-ext4-sysupgrade.img.gz"
+          TESTLOG="/tmp/doornet2-sysupgrade-test.log"
+          UPGRADELOG="/tmp/doornet2-upgrade.log"
+
+          RELEASE_INFO="/etc/doornet2_release"
+          EXPECTED_BOARD="embedfire,doornet2"
+          EXPECTED_ASSET="DoorNet2-ext4-sysupgrade.img.gz"
+
+
+          get_current_version() {
+              CURRENT_VERSION="unknown"
+              CURRENT_TAG="unknown"
+
+              if [ -f "$RELEASE_INFO" ]; then
+                  . "$RELEASE_INFO"
+
+                  CURRENT_VERSION="${DOORNET2_VERSION:-unknown}"
+                  CURRENT_TAG="${DOORNET2_TAG:-unknown}"
+              fi
+          }
+
+
+          get_root_info() {
+              ROOT_DEVICE="$(
+                  sed -n \
+                    's/.* root=\([^ ]*\).*/\1/p' \
+                    /proc/cmdline
+              )"
+
+              case "$ROOT_DEVICE" in
+                  /dev/mmcblk0p2)
+                      UPGRADE_DISK="/dev/mmcblk0"
+                      BOOT_MEDIA="eMMC"
+                      ;;
+
+                  /dev/mmcblk1p2)
+                      UPGRADE_DISK="/dev/mmcblk1"
+                      BOOT_MEDIA="TF"
+                      ;;
+
+                  *)
+                      UPGRADE_DISK="unknown"
+                      BOOT_MEDIA="unknown"
+                      ;;
+              esac
+          }
+
+
+          get_board() {
+              BOARD="$(
+                  cat /tmp/sysinfo/board_name 2>/dev/null
+              )"
+
+              [ -n "$BOARD" ] || BOARD="unknown"
+          }
+
+
+          fetch_metadata() {
+              mkdir -p "$WORKDIR"
+
+              rm -f "${META}.part"
+
+              if ! curl \
+                  -LfsS \
+                  --connect-timeout 15 \
+                  --retry 3 \
+                  -o "${META}.part" \
+                  "${BASE_URL}/version.json"
+              then
+                  return 1
+              fi
+
+              mv "${META}.part" "$META"
+
+              LATEST_VERSION="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.version' \
+                    2>/dev/null
+              )"
+
+              LATEST_TAG="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.tag' \
+                    2>/dev/null
+              )"
+
+              LATEST_BOARD="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.board' \
+                    2>/dev/null
+              )"
+
+              LATEST_ASSET="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.asset' \
+                    2>/dev/null
+              )"
+
+              LATEST_SHA="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.sha256' \
+                    2>/dev/null
+              )"
+
+              [ "$LATEST_BOARD" = "$EXPECTED_BOARD" ] || return 2
+              [ "$LATEST_ASSET" = "$EXPECTED_ASSET" ] || return 3
+              [ -n "$LATEST_VERSION" ] || return 4
+
+              echo "$LATEST_SHA" | \
+                  grep -Eq '^[0-9a-fA-F]{64}$' || return 5
+
+              return 0
+          }
+
+
+          command_status() {
+              get_current_version
+              get_root_info
+              get_board
+
+              printf '{'
+              printf '"ok":true,'
+              printf '"current_version":"%s",' "$CURRENT_VERSION"
+              printf '"current_tag":"%s",' "$CURRENT_TAG"
+              printf '"board":"%s",' "$BOARD"
+              printf '"root_device":"%s",' "$ROOT_DEVICE"
+              printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+              printf '"boot_media":"%s"' "$BOOT_MEDIA"
+              printf '}\n'
+          }
+
+
+          command_check() {
+              get_current_version
+              get_root_info
+              get_board
+
+              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
+                  printf '{"ok":false,"message":"board_mismatch"}\n'
+                  exit 1
+              fi
+
+              if ! fetch_metadata; then
+                  printf '{"ok":false,"message":"metadata_download_failed"}\n'
+                  exit 1
+              fi
+
+              if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+                  AVAILABLE="false"
+              else
+                  AVAILABLE="true"
+              fi
+
+              printf '{'
+              printf '"ok":true,'
+              printf '"current_version":"%s",' "$CURRENT_VERSION"
+              printf '"latest_version":"%s",' "$LATEST_VERSION"
+              printf '"latest_tag":"%s",' "$LATEST_TAG"
+              printf '"update_available":%s,' "$AVAILABLE"
+              printf '"boot_media":"%s",' "$BOOT_MEDIA"
+              printf '"upgrade_disk":"%s"' "$UPGRADE_DISK"
+              printf '}\n'
+          }
+
+
+          command_prepare() {
+              get_current_version
+              get_root_info
+              get_board
+
+              case "$ROOT_DEVICE" in
+                  /dev/mmcblk0p2|/dev/mmcblk1p2)
+                      ;;
+                  *)
+                      printf '{"ok":false,"message":"unsupported_root_device"}\n'
+                      exit 1
+                      ;;
+              esac
+
+              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
+                  printf '{"ok":false,"message":"board_mismatch"}\n'
+                  exit 1
+              fi
+
+              if ! fetch_metadata; then
+                  printf '{"ok":false,"message":"metadata_download_failed"}\n'
+                  exit 1
+              fi
+
+              rm -f "${FIRMWARE}.part"
+
+              if ! curl \
+                  -LfsS \
+                  --connect-timeout 15 \
+                  --retry 3 \
+                  -o "${FIRMWARE}.part" \
+                  "${BASE_URL}/${EXPECTED_ASSET}"
+              then
+                  rm -f "${FIRMWARE}.part"
+
+                  printf '{"ok":false,"message":"firmware_download_failed"}\n'
+                  exit 1
+              fi
+
+              mv "${FIRMWARE}.part" "$FIRMWARE"
+
+              ACTUAL_SHA="$(
+                  sha256sum "$FIRMWARE" | awk '{print $1}'
+              )"
+
+              if [ "$ACTUAL_SHA" != "$LATEST_SHA" ]; then
+                  rm -f "$FIRMWARE"
+
+                  printf '{"ok":false,"message":"sha256_failed"}\n'
+                  exit 1
+              fi
+
+              rm -f "$TESTLOG"
+
+              if ! /sbin/sysupgrade \
+                  -T \
+                  "$FIRMWARE" \
+                  >"$TESTLOG" 2>&1
+              then
+                  printf '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+                  exit 1
+              fi
+
+              SIZE="$(
+                  du -h "$FIRMWARE" | awk '{print $1}'
+              )"
+
+              printf '{'
+              printf '"ok":true,'
+              printf '"ready":true,'
+              printf '"current_version":"%s",' "$CURRENT_VERSION"
+              printf '"latest_version":"%s",' "$LATEST_VERSION"
+              printf '"sha256":"%s",' "$ACTUAL_SHA"
+              printf '"size":"%s",' "$SIZE"
+              printf '"boot_media":"%s",' "$BOOT_MEDIA"
+              printf '"upgrade_disk":"%s"' "$UPGRADE_DISK"
+              printf '}\n'
+          }
+
+
+          command_upgrade() {
+              get_root_info
+              get_board
+
+              case "$ROOT_DEVICE" in
+                  /dev/mmcblk0p2|/dev/mmcblk1p2)
+                      ;;
+                  *)
+                      printf '{"ok":false,"message":"unsupported_root_device"}\n'
+                      exit 1
+                      ;;
+              esac
+
+              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
+                  printf '{"ok":false,"message":"board_mismatch"}\n'
+                  exit 1
+              fi
+
+              if [ ! -f "$META" ] || \
+                 [ ! -f "$FIRMWARE" ]; then
+
+                  printf '{"ok":false,"message":"firmware_not_prepared"}\n'
+                  exit 1
+              fi
+
+              LATEST_SHA="$(
+                  jsonfilter \
+                    -i "$META" \
+                    -e '@.sha256' \
+                    2>/dev/null
+              )"
+
+              ACTUAL_SHA="$(
+                  sha256sum "$FIRMWARE" | awk '{print $1}'
+              )"
+
+              if [ -z "$LATEST_SHA" ] || \
+                 [ "$LATEST_SHA" != "$ACTUAL_SHA" ]; then
+
+                  printf '{"ok":false,"message":"sha256_failed"}\n'
+                  exit 1
+              fi
+
+              if ! /sbin/sysupgrade \
+                  -T \
+                  "$FIRMWARE" \
+                  >"$TESTLOG" 2>&1
+              then
+                  printf '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+                  exit 1
+              fi
+
+              sync
+
+              (
+                  sleep 3
+
+                  /sbin/sysupgrade \
+                    -v \
+                    "$FIRMWARE"
+
+              ) >"$UPGRADELOG" 2>&1 </dev/null &
+
+              printf '{'
+              printf '"ok":true,'
+              printf '"started":true,'
+              printf '"boot_media":"%s",' "$BOOT_MEDIA"
+              printf '"upgrade_disk":"%s"' "$UPGRADE_DISK"
+              printf '}\n'
+          }
+
+
+          case "$1" in
+              status)
+                  command_status
+                  ;;
+
+              check)
+                  command_check
+                  ;;
+
+              prepare)
+                  command_prepare
+                  ;;
+
+              upgrade)
+                  command_upgrade
+                  ;;
+
+              *)
+                  echo "Usage:"
+                  echo "  doornet2-updater status"
+                  echo "  doornet2-updater check"
+                  echo "  doornet2-updater prepare"
+                  echo "  doornet2-updater upgrade"
+                  exit 1
+                  ;;
+          esac
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-updater
+
+
+          #
+          # LuCI controller
+          #
+          cat > \
+            files/usr/lib/lua/luci/controller/doornet2_update.lua \
+            <<'EOF'
+          module("luci.controller.doornet2_update", package.seeall)
+
+          function index()
+
+              if not nixio.fs.access("/usr/bin/doornet2-updater") then
+                  return
+              end
+
+              local page
+
+              page = entry(
+                  {"admin", "system", "doornet2_update"},
+                  template("doornet2/update"),
+                  _("DoorNet2 在线升级"),
+                  90
+              )
+
+              page.dependent = false
+
+              entry(
+                  {"admin", "system", "doornet2_update", "status"},
+                  call("action_status")
+              ).leaf = true
+
+              entry(
+                  {"admin", "system", "doornet2_update", "check"},
+                  call("action_check")
+              ).leaf = true
+
+              entry(
+                  {"admin", "system", "doornet2_update", "prepare"},
+                  call("action_prepare")
+              ).leaf = true
+
+              entry(
+                  {"admin", "system", "doornet2_update", "upgrade"},
+                  call("action_upgrade")
+              ).leaf = true
+          end
+
+
+          local function output_json(command)
+
+              local http = require "luci.http"
+              local sys  = require "luci.sys"
+
+              local result = sys.exec(
+                  "/usr/bin/doornet2-updater " ..
+                  command ..
+                  " 2>/dev/null"
+              )
+
+              http.prepare_content("application/json")
+              http.write(result)
+          end
+
+
+          local function require_post()
+
+              local http = require "luci.http"
+
+              if http.getenv("REQUEST_METHOD") ~= "POST" then
+
+                  http.status(405, "Method Not Allowed")
+                  http.prepare_content("application/json")
+
+                  http.write(
+                      '{"ok":false,"message":"POST required"}'
+                  )
+
+                  return false
+              end
+
+              return true
+          end
+
+
+          function action_status()
+              output_json("status")
+          end
+
+
+          function action_check()
+              output_json("check")
+          end
+
+
+          function action_prepare()
+
+              if not require_post() then
+                  return
+              end
+
+              output_json("prepare")
+          end
+
+
+          function action_upgrade()
+
+              if not require_post() then
+                  return
+              end
+
+              output_json("upgrade")
+          end
+          EOF
+
+
+          #
+          # LuCI page
+          #
+          cat > \
+            files/usr/lib/lua/luci/view/doornet2/update.htm \
+            <<'EOF'
+          <%+header%>
+
+          <h2>
+              <%:DoorNet2 在线升级%>
+          </h2>
+
+          <div class="cbi-map">
+
+              <div class="cbi-section">
+
+                  <h3>
+                      <%:固件信息%>
+                  </h3>
+
+                  <table class="table">
+
+                      <tr class="tr">
+                          <td class="td">
+                              <strong>当前版本</strong>
+                          </td>
+                          <td class="td" id="current_version">
+                              正在读取...
+                          </td>
+                      </tr>
+
+                      <tr class="tr">
+                          <td class="td">
+                              <strong>最新版本</strong>
+                          </td>
+                          <td class="td" id="latest_version">
+                              尚未检查
+                          </td>
+                      </tr>
+
+                      <tr class="tr">
+                          <td class="td">
+                              <strong>当前启动介质</strong>
+                          </td>
+                          <td class="td" id="boot_media">
+                              -
+                          </td>
+                      </tr>
+
+                      <tr class="tr">
+                          <td class="td">
+                              <strong>升级目标磁盘</strong>
+                          </td>
+                          <td class="td" id="upgrade_disk">
+                              -
+                          </td>
+                      </tr>
+
+                  </table>
+
+              </div>
+
+
+              <div class="cbi-section">
+
+                  <h3>
+                      <%:在线升级%>
+                  </h3>
+
+                  <p>
+                      系统会依次执行：
+                      检查 GitHub 最新版本 →
+                      下载固件 →
+                      SHA256 校验 →
+                      sysupgrade 兼容性检查 →
+                      正式升级。
+                  </p>
+
+                  <p>
+                      TF 启动时只升级 TF；
+                      eMMC 启动时只升级 eMMC。
+                  </p>
+
+
+                  <div style="margin-top:20px">
+
+                      <input
+                          type="button"
+                          class="btn cbi-button cbi-button-action"
+                          id="btn_check"
+                          value="检查更新"
+                          onclick="checkUpdate()"
+                      />
+
+                      &nbsp;
+
+                      <input
+                          type="button"
+                          class="btn cbi-button cbi-button-apply"
+                          id="btn_prepare"
+                          value="下载并校验"
+                          onclick="prepareUpdate()"
+                          disabled="disabled"
+                      />
+
+                      &nbsp;
+
+                      <input
+                          type="button"
+                          class="btn cbi-button cbi-button-negative"
+                          id="btn_upgrade"
+                          value="立即升级"
+                          onclick="startUpgrade()"
+                          disabled="disabled"
+                      />
+
+                  </div>
+
+
+                  <div
+                      id="status_box"
+                      style="
+                          margin-top:20px;
+                          padding:15px;
+                          border:1px solid #ccc;
+                          border-radius:4px;
+                          min-height:24px;
+                      "
+                  >
+                      正在读取设备信息...
+                  </div>
+
+              </div>
+
+          </div>
+
+
+          <script type="text/javascript">
+
+          var URL_STATUS =
+              '<%=luci.dispatcher.build_url(
+                  "admin",
+                  "system",
+                  "doornet2_update",
+                  "status"
+              )%>';
+
+          var URL_CHECK =
+              '<%=luci.dispatcher.build_url(
+                  "admin",
+                  "system",
+                  "doornet2_update",
+                  "check"
+              )%>';
+
+          var URL_PREPARE =
+              '<%=luci.dispatcher.build_url(
+                  "admin",
+                  "system",
+                  "doornet2_update",
+                  "prepare"
+              )%>';
+
+          var URL_UPGRADE =
+              '<%=luci.dispatcher.build_url(
+                  "admin",
+                  "system",
+                  "doornet2_update",
+                  "upgrade"
+              )%>';
+
+
+          function setStatus(text)
+          {
+              document.getElementById(
+                  "status_box"
+              ).innerHTML = text;
+          }
+
+
+          function setBusy(busy)
+          {
+              document.getElementById(
+                  "btn_check"
+              ).disabled = busy;
+
+              if (busy)
+              {
+                  document.getElementById(
+                      "btn_prepare"
+                  ).disabled = true;
+
+                  document.getElementById(
+                      "btn_upgrade"
+                  ).disabled = true;
+              }
+          }
+
+
+          function request(url, method, callback)
+          {
+              var xhr = new XMLHttpRequest();
+
+              xhr.open(
+                  method,
+                  url,
+                  true
+              );
+
+              if (method == "POST")
+              {
+                  xhr.setRequestHeader(
+                      "Content-Type",
+                      "application/x-www-form-urlencoded"
+                  );
+              }
+
+              xhr.onreadystatechange = function()
+              {
+                  if (xhr.readyState != 4)
+                      return;
+
+                  var data = null;
+
+                  try
+                  {
+                      data = JSON.parse(
+                          xhr.responseText
+                      );
+                  }
+                  catch (e)
+                  {
+                      callback(
+                          {
+                              ok: false,
+                              message:
+                                  "返回数据解析失败"
+                          }
+                      );
+
+                      return;
+                  }
+
+                  callback(data);
+              };
+
+              xhr.send(
+                  method == "POST"
+                      ? "confirm=1"
+                      : null
+              );
+          }
+
+
+          function loadStatus()
+          {
+              request(
+                  URL_STATUS,
+                  "GET",
+                  function(data)
+                  {
+                      if (!data.ok)
+                      {
+                          setStatus(
+                              "无法读取设备状态。"
+                          );
+
+                          return;
+                      }
+
+                      document.getElementById(
+                          "current_version"
+                      ).innerHTML =
+                          data.current_version;
+
+                      document.getElementById(
+                          "boot_media"
+                      ).innerHTML =
+                          data.boot_media;
+
+                      document.getElementById(
+                          "upgrade_disk"
+                      ).innerHTML =
+                          data.upgrade_disk;
+
+                      setStatus(
+                          "设备状态正常。"
+                      );
+                  }
+              );
+          }
+
+
+          function checkUpdate()
+          {
+              setBusy(true);
+
+              setStatus(
+                  "正在连接 GitHub 检查最新版本..."
+              );
+
+              request(
+                  URL_CHECK,
+                  "GET",
+                  function(data)
+                  {
+                      setBusy(false);
+
+                      if (!data.ok)
+                      {
+                          setStatus(
+                              "检查更新失败：" +
+                              (
+                                  data.message ||
+                                  "未知错误"
+                              )
+                          );
+
+                          return;
+                      }
+
+                      document.getElementById(
+                          "current_version"
+                      ).innerHTML =
+                          data.current_version;
+
+                      document.getElementById(
+                          "latest_version"
+                      ).innerHTML =
+                          data.latest_version;
+
+                      document.getElementById(
+                          "boot_media"
+                      ).innerHTML =
+                          data.boot_media;
+
+                      document.getElementById(
+                          "upgrade_disk"
+                      ).innerHTML =
+                          data.upgrade_disk;
+
+                      if (data.update_available)
+                      {
+                          setStatus(
+                              "<strong>发现新版本。</strong>" +
+                              "<br />" +
+                              "可以点击“下载并校验”。"
+                          );
+
+                          document.getElementById(
+                              "btn_prepare"
+                          ).disabled = false;
+                      }
+                      else
+                      {
+                          setStatus(
+                              "<strong>当前已经是最新版本。</strong>"
+                          );
+                      }
+                  }
+              );
+          }
+
+
+          function prepareUpdate()
+          {
+              if (!confirm(
+                  "现在开始下载最新版固件并进行 SHA256 和兼容性校验？"
+              ))
+              {
+                  return;
+              }
+
+              setBusy(true);
+
+              setStatus(
+                  "正在下载固件并校验，请不要关闭页面。"
+                  + "<br />"
+                  + "通常需要几十秒。"
+              );
+
+              request(
+                  URL_PREPARE,
+                  "POST",
+                  function(data)
+                  {
+                      setBusy(false);
+
+                      if (!data.ok)
+                      {
+                          setStatus(
+                              "<strong>准备升级失败：</strong> " +
+                              (
+                                  data.message ||
+                                  "未知错误"
+                              )
+                          );
+
+                          return;
+                      }
+
+                      document.getElementById(
+                          "latest_version"
+                      ).innerHTML =
+                          data.latest_version;
+
+                      setStatus(
+                          "<strong>固件准备完成。</strong>"
+                          + "<br />"
+                          + "SHA256：验证通过"
+                          + "<br />"
+                          + "sysupgrade：兼容性检查通过"
+                          + "<br />"
+                          + "固件大小：" +
+                          data.size
+                          + "<br />"
+                          + "升级目标：" +
+                          data.upgrade_disk
+                      );
+
+                      document.getElementById(
+                          "btn_upgrade"
+                      ).disabled = false;
+                  }
+              );
+          }
+
+
+          function startUpgrade()
+          {
+              var disk =
+                  document.getElementById(
+                      "upgrade_disk"
+                  ).innerHTML;
+
+              if (!confirm(
+                  "即将正式升级 " +
+                  disk +
+                  "。\n\n" +
+                  "升级期间绝对不要断电，也不要拔出 TF/eMMC。\n\n" +
+                  "确定继续？"
+              ))
+              {
+                  return;
+              }
+
+              setBusy(true);
+
+              setStatus(
+                  "<strong>正在启动固件升级。</strong>"
+                  + "<br />"
+                  + "设备将在几秒后断开连接并自动重启。"
+                  + "<br /><br />"
+                  + "升级期间请勿断电。"
+              );
+
+              request(
+                  URL_UPGRADE,
+                  "POST",
+                  function(data)
+                  {
+                      if (!data.ok)
+                      {
+                          setBusy(false);
+
+                          setStatus(
+                              "<strong>启动升级失败：</strong> " +
+                              (
+                                  data.message ||
+                                  "未知错误"
+                              )
+                          );
+
+                          return;
+                      }
+
+                      setStatus(
+                          "<strong>升级已经开始。</strong>"
+                          + "<br />"
+                          + "目标磁盘：" +
+                          data.upgrade_disk
+                          + "<br />"
+                          + "当前启动介质：" +
+                          data.boot_media
+                          + "<br /><br />"
+                          + "请等待约 3～5 分钟，"
+                          + "设备会自动重新启动。"
+                      );
+                  }
+              );
+          }
+
+
+          window.onload = loadStatus;
+
+          </script>
+
+          <%+footer%>
+          EOF
 
 
       - name: Configure TF card priority boot
         run: |
-          echo "========================================"
-          echo "DoorNet2 smart boot"
-          echo "TF inserted -> TF kernel + TF rootfs"
-          echo "TF removed  -> eMMC kernel + eMMC rootfs"
-          echo "========================================"
-
           cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
           #
           # EmbedFire DoorNet2 TF/eMMC smart boot
-          #
-          # U-Boot:
-          #   mmc1 = TF / SD
-          #   mmc0 = eMMC
-          #
-          # Linux:
-          #   mmcblk1 = TF / SD
-          #   mmcblk0 = eMMC
           #
 
           if test "${devtype}" = "mmc"; then
@@ -395,17 +1335,10 @@ jobs:
           start = new_text.find(start_marker)
           end = new_text.find("endef", start)
 
-          print(new_text[start:end + len("endef")])
+          print(
+              new_text[start:end + len("endef")]
+          )
           PY
-
-          if ! grep -A8 \
-            "define Device/embedfire_doornet2" \
-            target/linux/rockchip/image/armv8.mk | \
-            grep -q "BOOT_SCRIPT := doornet2"; then
-
-            echo "ERROR: BOOT_SCRIPT not enabled"
-            exit 1
-          fi
 
 
       - name: Add taskd compatibility fix
@@ -439,9 +1372,6 @@ jobs:
               cat "$TMP" > "$TASKS"
               rm -f "$TMP"
               chmod 755 "$TASKS"
-
-              logger -t taskd \
-                "Applied extra_command compatibility fix"
           fi
 
           exit 0
@@ -460,9 +1390,6 @@ jobs:
 
           CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
 
-          #
-          # Partition size
-          #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=7168
 
@@ -477,7 +1404,7 @@ jobs:
           CONFIG_PACKAGE_luci-compat=y
 
           #
-          # Online update support
+          # Online updater
           #
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_ca-bundle=y
@@ -485,7 +1412,7 @@ jobs:
           CONFIG_PACKAGE_jsonfilter=y
 
           #
-          # Block / disk tools
+          # Disk tools
           #
           CONFIG_PACKAGE_lsblk=y
           CONFIG_PACKAGE_fdisk=y
@@ -496,15 +1423,12 @@ jobs:
           CONFIG_PACKAGE_mount-utils=y
 
           #
-          # Ext4 filesystem tools
+          # Ext4 tools
           #
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG_PACKAGE_resize2fs=y
           CONFIG_PACKAGE_tune2fs=y
 
-          #
-          # OpenWrt storage management
-          #
           CONFIG_PACKAGE_block-mount=y
           CONFIG_PACKAGE_kmod-fs-ext4=y
 
@@ -516,50 +1440,25 @@ jobs:
           make defconfig
 
           echo "========================================"
-          echo "DoorNet2 target"
+          echo "DoorNet2"
           echo "========================================"
 
           grep -E \
             'CONFIG_TARGET.*embedfire_doornet2' \
             .config || true
 
-          echo "========================================"
-          echo "RootFS size"
-          echo "========================================"
-
           grep \
             'CONFIG_TARGET_ROOTFS_PARTSIZE' \
             .config || true
 
           echo "========================================"
-          echo "iStore"
+          echo "Online updater files"
           echo "========================================"
 
-          grep -E \
-            'CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_luci-compat' \
-            .config || true
-
-          echo "========================================"
-          echo "Online update support"
-          echo "========================================"
-
-          grep -E \
-            'CONFIG_PACKAGE_(curl|ca-bundle|ca-certificates|jsonfilter)' \
-            .config || true
-
-          echo "========================================"
-          echo "LAN IP"
-          echo "========================================"
-
-          grep -n \
-            "192\.168\.100\.1" \
-            package/base-files/files/bin/config_generate
-
-          echo "========================================"
-          echo "OPKG feeds"
-          echo "========================================"
-
-          cat files/etc/opkg/distfeeds.conf
+          ls -lah \
+            files/usr/bin/doornet2-updater \
+            files/usr/lib/lua/luci/controller/doornet2_update.lua \
+            files/usr/lib/lua/luci/view/doornet2/update.htm
 
 
       - name: Download packages
@@ -575,15 +1474,7 @@ jobs:
         run: |
           make -j$(nproc) || make -j1 V=s
 
-          echo "========================================"
-          echo "Space usage"
-          echo "========================================"
-
           df -h
-
-          echo "========================================"
-          echo "Firmware files"
-          echo "========================================"
 
           find ./bin/targets/ \
             -type f \
@@ -632,12 +1523,9 @@ jobs:
           )"
 
           if [ -z "$SOURCE_FW" ]; then
-            echo "ERROR: DoorNet2 ext4 sysupgrade firmware not found"
+            echo "ERROR: DoorNet2 firmware not found"
             exit 1
           fi
-
-          echo "Release firmware source:"
-          echo "$SOURCE_FW"
 
           cp -f \
             "$SOURCE_FW" \
@@ -687,8 +1575,9 @@ jobs:
           - TF removed: boot from eMMC
           - iStore included
           - Self-hosted matching OPKG feed
+          - LuCI online firmware updater
 
-          Release firmware:
+          Firmware:
 
           DoorNet2-ext4-sysupgrade.img.gz
 
@@ -697,21 +1586,9 @@ jobs:
           ${SHA256}
           EOF
 
-          echo "========================================"
-          echo "Release files"
-          echo "========================================"
-
-          ls -lah
-
-          cat version.json
-
 
       - name: Prepare OPKG feed
         run: |
-          echo "========================================"
-          echo "Prepare GitHub OPKG feed"
-          echo "========================================"
-
           rm -rf ./artifact/opkg-feed
 
           mkdir -p \
@@ -732,7 +1609,6 @@ jobs:
 
             echo "ERROR: target packages directory not found"
             exit 1
-
           fi
 
           cat > ./artifact/opkg-feed/README.md <<EOF
@@ -741,20 +1617,11 @@ jobs:
           Repository:
           ${GITHUB_REPOSITORY}
 
-          Target:
-          rockchip/armv8
-
-          Architecture:
-          aarch64_generic
-
           Firmware version:
           ${DOORNET2_VERSION}
 
-          Git commit:
+          Commit:
           ${GITHUB_SHA}
-
-          Build:
-          ${GITHUB_RUN_NUMBER}
           EOF
 
           PACKAGE_INDEX_COUNT="$(
@@ -764,14 +1631,10 @@ jobs:
               | wc -l
           )"
 
-          echo "Found ${PACKAGE_INDEX_COUNT} package indexes"
-
           if [ "$PACKAGE_INDEX_COUNT" -lt 2 ]; then
-            echo "ERROR: Package indexes were not generated"
+            echo "ERROR: Package indexes missing"
             exit 1
           fi
-
-          du -sh ./artifact/opkg-feed
 
 
       - name: Upload buildinfo
@@ -818,10 +1681,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          echo "========================================"
-          echo "Publish OPKG feed"
-          echo "========================================"
-
           rm -rf /tmp/doornet2-opkg-feed
 
           git clone \
@@ -855,20 +1714,11 @@ jobs:
             origin \
             opkg-feed
 
-          echo "OPKG feed published successfully"
-
 
       - name: Publish firmware release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "========================================"
-          echo "Publish DoorNet2 GitHub Release"
-          echo "========================================"
-
-          echo "Tag:"
-          echo "${DOORNET2_TAG}"
-
           gh release create \
             "${DOORNET2_TAG}" \
             "${GITHUB_WORKSPACE}/artifact/release/DoorNet2-ext4-sysupgrade.img.gz" \
@@ -879,10 +1729,6 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "DoorNet2 ${DOORNET2_VERSION}" \
             --notes-file "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
-
-          echo "========================================"
-          echo "Firmware release published successfully"
-          echo "========================================"
 
           gh release view \
             "${DOORNET2_TAG}" \
