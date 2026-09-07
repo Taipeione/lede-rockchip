@@ -1,12 +1,14 @@
 #
-# DoorNet2 OpenWrt + iStore
-# LAN: 192.168.100.1
-# Boot:
-#   TF inserted -> boot kernel + rootfs from TF
-#   TF removed  -> boot kernel + rootfs from eMMC
+# EmbedFire DoorNet2 OpenWrt + iStore
 #
-# Base source:
-# https://github.com/DHDAXCW/lede-rockchip
+# Features:
+# - LAN IP: 192.168.100.1
+# - 4GB ext4 rootfs
+# - TF/SD priority boot
+# - No TF -> fallback to eMMC
+# - iStore
+# - Disk management utilities
+# - taskd compatibility fix
 #
 
 name: DoorNet2-OpenWrt-iStore
@@ -30,7 +32,14 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           docker rmi $(docker images -q) 2>/dev/null || true
-          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
+
+          sudo -E rm -rf \
+            /usr/share/dotnet \
+            /etc/mysql \
+            /etc/php \
+            /etc/apt/sources.list.d \
+            /usr/local/lib/android
+
           sudo -E apt-mark hold grub-efi-amd64-signed
           sudo -E apt update
 
@@ -131,9 +140,9 @@ jobs:
 
       - name: Add iStore feed
         run: |
-          echo "=============================="
+          echo "========================================"
           echo "Add iStore feed"
-          echo "=============================="
+          echo "========================================"
 
           grep -q '^src-git istore ' feeds.conf.default || \
             echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
@@ -144,6 +153,7 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a -f
+
           ./scripts/feeds install -d y -p istore luci-app-store
 
       - name: Set default LAN IP
@@ -151,7 +161,7 @@ jobs:
           LAN_CONFIG="package/base-files/files/bin/config_generate"
 
           echo "========================================"
-          echo "Set LAN IP: 192.168.100.1"
+          echo "Set LAN IP to 192.168.100.1"
           echo "========================================"
 
           if [ ! -f "$LAN_CONFIG" ]; then
@@ -164,7 +174,9 @@ jobs:
             exit 1
           fi
 
-          sed -i 's/192\.168\.1\.1/192.168.100.1/g' "$LAN_CONFIG"
+          sed -i \
+            's/192\.168\.1\.1/192.168.100.1/g' \
+            "$LAN_CONFIG"
 
           if ! grep -q "192\.168\.100\.1" "$LAN_CONFIG"; then
             echo "ERROR: LAN IP modification failed"
@@ -184,31 +196,41 @@ jobs:
 
           cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
           #
-          # EmbedFire DoorNet2 smart TF/eMMC boot
+          # EmbedFire DoorNet2 TF/eMMC smart boot
           #
           # U-Boot:
           #   mmc1 = TF / SD
           #   mmc0 = eMMC
           #
-          # Linux on DoorNet2:
+          # Linux:
           #   mmcblk1 = TF / SD
           #   mmcblk0 = eMMC
           #
 
           if test "${devtype}" = "mmc"; then
+
               if test "${devnum}" = "1"; then
-                  echo "DoorNet2: booting completely from TF card";
+
+                  echo "DoorNet2: boot completely from TF card";
                   setenv rootdev "/dev/mmcblk1p2";
+
               elif test "${devnum}" = "0"; then
-                  echo "DoorNet2: booting completely from eMMC";
+
+                  echo "DoorNet2: boot completely from eMMC";
                   setenv rootdev "/dev/mmcblk0p2";
+
               else
+
                   part uuid ${devtype} ${devnum}:2 uuid;
                   setenv rootdev "PARTUUID=${uuid}";
+
               fi;
+
           else
+
               part uuid ${devtype} ${devnum}:2 uuid;
               setenv rootdev "PARTUUID=${uuid}";
+
           fi;
 
           if test "${stdout}" = "serial@fe660000"; then
@@ -238,73 +260,151 @@ jobs:
           start = text.find(start_marker)
 
           if start == -1:
-              raise SystemExit("ERROR: DoorNet2 device definition not found")
+              raise SystemExit(
+                  "ERROR: DoorNet2 device definition not found"
+              )
 
           end = text.find("endef", start)
 
           if end == -1:
-              raise SystemExit("ERROR: DoorNet2 device block is incomplete")
+              raise SystemExit(
+                  "ERROR: DoorNet2 device definition incomplete"
+              )
 
           block = text[start:end]
 
           if "BOOT_SCRIPT := doornet2" not in block:
+
               if "  BOOT_FLOW := pine64-bin\n" not in block:
-                  raise SystemExit("ERROR: DoorNet2 BOOT_FLOW not found")
+                  raise SystemExit(
+                      "ERROR: DoorNet2 BOOT_FLOW not found"
+                  )
 
               block = block.replace(
                   "  BOOT_FLOW := pine64-bin\n",
-                  "  BOOT_FLOW := pine64-bin\n  BOOT_SCRIPT := doornet2\n"
+                  "  BOOT_FLOW := pine64-bin\n"
+                  "  BOOT_SCRIPT := doornet2\n"
               )
 
               text = text[:start] + block + text[end:]
               path.write_text(text)
 
-          print("DoorNet2 device block:")
           new_text = path.read_text()
           start = new_text.find(start_marker)
           end = new_text.find("endef", start)
-          print(new_text[start:end + len("endef")])
+
+          print(
+              new_text[start:end + len("endef")]
+          )
           PY
 
-          echo "========================================"
-          echo "Custom boot script:"
-          echo "========================================"
-          cat target/linux/rockchip/image/doornet2.bootscript
-
-          echo "========================================"
-          echo "Check BOOT_SCRIPT:"
-          echo "========================================"
-
-          grep -A8 "define Device/embedfire_doornet2" \
-            target/linux/rockchip/image/armv8.mk
-
-          if ! grep -A8 "define Device/embedfire_doornet2" \
+          if ! grep -A8 \
+            "define Device/embedfire_doornet2" \
             target/linux/rockchip/image/armv8.mk | \
             grep -q "BOOT_SCRIPT := doornet2"; then
-            echo "ERROR: BOOT_SCRIPT was not enabled"
+
+            echo "ERROR: BOOT_SCRIPT not enabled"
             exit 1
           fi
 
           echo "TF/eMMC smart boot configuration OK"
 
-      - name: Configure DoorNet2 and iStore
+      - name: Add taskd compatibility fix
+        run: |
+          echo "========================================"
+          echo "Add iStore/taskd compatibility fix"
+          echo "========================================"
+
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/99-taskd-compat <<'EOF'
+          #!/bin/sh
+
+          TASKS="/etc/init.d/tasks"
+
+          if [ -f "$TASKS" ] && \
+             grep -q 'extra_command ' "$TASKS" && \
+             ! grep -q 'TASKD_EXTRA_COMMAND_COMPAT' "$TASKS"; then
+
+              TMP="/tmp/tasks.compat.$$"
+
+              awk '
+              NR == 1 {
+                  print
+                  print ""
+                  print "# TASKD_EXTRA_COMMAND_COMPAT"
+                  print "type extra_command >/dev/null 2>&1 || extra_command() { :; }"
+                  next
+              }
+              {
+                  print
+              }
+              ' "$TASKS" > "$TMP"
+
+              cat "$TMP" > "$TASKS"
+              rm -f "$TMP"
+              chmod 755 "$TASKS"
+
+              logger -t taskd \
+                "Applied extra_command compatibility fix"
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 \
+            files/etc/uci-defaults/99-taskd-compat
+
+      - name: Configure DoorNet2 and packages
         run: |
           cat >> .config <<'EOF'
+
           CONFIG_TARGET_rockchip=y
           CONFIG_TARGET_rockchip_armv8=y
           CONFIG_TARGET_MULTI_PROFILE=y
 
           CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
 
+          #
+          # Partition size
+          #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
-          CONFIG_TARGET_ROOTFS_PARTSIZE=512
+          CONFIG_TARGET_ROOTFS_PARTSIZE=4096
 
           CONFIG_TARGET_ROOTFS_TARGZ=y
           CONFIG_TARGET_ROOTFS_EXT4FS=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
 
+          #
+          # iStore
+          #
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
+
+          #
+          # Block / disk tools
+          #
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_sfdisk=y
+          CONFIG_PACKAGE_blkid=y
+          CONFIG_PACKAGE_blockdev=y
+          CONFIG_PACKAGE_partx-utils=y
+          CONFIG_PACKAGE_mount-utils=y
+
+          #
+          # Ext4 filesystem tools
+          #
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_resize2fs=y
+          CONFIG_PACKAGE_tune2fs=y
+
+          #
+          # OpenWrt storage management
+          #
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+
           EOF
 
       - name: Generate configuration file
@@ -312,45 +412,78 @@ jobs:
           make defconfig
 
           echo "========================================"
-          echo "DoorNet2:"
+          echo "DoorNet2 target"
           echo "========================================"
-          grep -E 'CONFIG_TARGET.*embedfire_doornet2' .config || true
+
+          grep -E \
+            'CONFIG_TARGET.*embedfire_doornet2' \
+            .config || true
 
           echo "========================================"
-          echo "iStore:"
+          echo "RootFS size"
           echo "========================================"
-          grep -E 'CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_luci-compat' .config || true
+
+          grep \
+            'CONFIG_TARGET_ROOTFS_PARTSIZE' \
+            .config || true
 
           echo "========================================"
-          echo "LAN:"
+          echo "iStore"
           echo "========================================"
-          grep -n "192\.168\.100\.1" \
+
+          grep -E \
+            'CONFIG_PACKAGE_luci-app-store|CONFIG_PACKAGE_luci-compat' \
+            .config || true
+
+          echo "========================================"
+          echo "Storage tools"
+          echo "========================================"
+
+          grep -E \
+            'CONFIG_PACKAGE_(lsblk|fdisk|sfdisk|blkid|blockdev|partx-utils|mount-utils|e2fsprogs|resize2fs|tune2fs|block-mount)' \
+            .config || true
+
+          echo "========================================"
+          echo "LAN IP"
+          echo "========================================"
+
+          grep -n \
+            "192\.168\.100\.1" \
             package/base-files/files/bin/config_generate
 
           echo "========================================"
-          echo "Boot mode:"
+          echo "Boot mode"
           echo "========================================"
-          grep -A8 "define Device/embedfire_doornet2" \
+
+          grep -A8 \
+            "define Device/embedfire_doornet2" \
             target/linux/rockchip/image/armv8.mk
 
       - name: Download packages
         run: |
           make download -j16
-          find dl -size -1024c -exec rm -f {} \;
+
+          find dl \
+            -size -1024c \
+            -exec rm -f {} \;
 
       - name: Compile firmware
         run: |
           make -j$(nproc) || make -j1 V=s
 
-          echo "======================="
-          echo "Space usage:"
-          echo "======================="
+          echo "========================================"
+          echo "Space usage"
+          echo "========================================"
+
           df -h
 
-          echo "======================="
-          echo "Firmware files:"
-          echo "======================="
-          find ./bin/targets/ -type f | sort
+          echo "========================================"
+          echo "Firmware files"
+          echo "========================================"
+
+          find ./bin/targets/ \
+            -type f \
+            | sort
 
       - name: Prepare artifact
         run: |
@@ -358,8 +491,11 @@ jobs:
           mkdir -p ./artifact/buildinfo
           mkdir -p ./artifact/firmware
 
-          find ./bin/targets/ -type d -name "packages" \
-            -prune -exec rm -rf {} +
+          find ./bin/targets/ \
+            -type d \
+            -name "packages" \
+            -prune \
+            -exec rm -rf {} +
 
           find ./bin/packages/ \
             -type f \
@@ -368,29 +504,34 @@ jobs:
 
           find ./bin/targets/ \
             -type f \
-            \( -name "*.buildinfo" -o \
-               -name "*.manifest" -o \
-               -name "*.config" \) \
+            \( \
+              -name "*.buildinfo" \
+              -o -name "*.manifest" \
+              -o -name "*.config" \
+            \) \
             -exec cp -f {} ./artifact/buildinfo/ \;
 
           find ./bin/targets/ \
             -type f \
-            \( -name "*.img" -o \
-               -name "*.img.gz" -o \
-               -name "*.bin" -o \
-               -name "*.itb" -o \
-               -name "*.gz" \) \
+            \( \
+              -name "*.img" \
+              -o -name "*.img.gz" \
+              -o -name "*.bin" \
+              -o -name "*.itb" \
+              -o -name "*.gz" \
+            \) \
             -exec cp -f {} ./artifact/firmware/ \;
 
           cd ./artifact/firmware
 
           if [ "$(find . -maxdepth 1 -type f | wc -l)" -gt 0 ]; then
-            sha256sum * > sha256sums.txt
+              sha256sum * > sha256sums.txt
           fi
 
           echo "========================================"
-          echo "Firmware artifact:"
+          echo "Firmware artifact"
           echo "========================================"
+
           ls -lah
 
       - name: Upload buildinfo
