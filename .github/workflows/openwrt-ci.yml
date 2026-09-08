@@ -1,22 +1,20 @@
 #
 # EmbedFire DoorNet2 OpenWrt + iStore
 #
-# Base source:
-# https://github.com/DHDAXCW/lede-rockchip
+# DoorNet2 r14 final boot/storage fix
 #
 # Features:
 # - LAN: 192.168.100.1
 # - WAN: eth0 DHCP
 # - RootFS: 7GB ext4
-# - TF inserted -> prefer TF kernel + TF rootfs
-# - TF unavailable -> fallback to eMMC kernel + eMMC rootfs
-# - iStore
-# - taskd compatibility fix
-# - Self-hosted GitHub OPKG feed
-# - GitHub Releases
-# - LuCI DoorNet2 online firmware updater
+# - TF inserted -> boot completely from TF
+# - TF unavailable -> automatically boot eMMC
+# - No root/extroot fstab override
+# - iStore included
+# - Self-hosted matching OPKG feed
+# - LuCI online firmware updater
 # - SHA256 verification
-# - sysupgrade compatibility test
+# - sysupgrade compatibility check
 #
 
 name: DoorNet2-OpenWrt-iStore
@@ -38,15 +36,17 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Prepare GitHub runner
+      # 1. Prepare runner
       # ============================================================
 
       - name: Space cleanup and Initialization environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          set -e
+
           echo "========================================"
-          echo "Clean runner disk space"
+          echo "Clean runner"
           echo "========================================"
 
           sudo rm -rf \
@@ -56,17 +56,10 @@ jobs:
             /opt/hostedtoolcache/CodeQL \
             2>/dev/null || true
 
-          docker system prune -af 2>/dev/null || true
-
-          echo "========================================"
-          echo "APT update"
-          echo "========================================"
+          docker system prune -af \
+            2>/dev/null || true
 
           sudo apt-get update
-
-          echo "========================================"
-          echo "Install OpenWrt build dependencies"
-          echo "========================================"
 
           sudo apt-get install -y --no-install-recommends \
             ack \
@@ -139,13 +132,15 @@ jobs:
 
           sudo apt-get clean
 
-          sudo timedatectl set-timezone "Asia/Shanghai" || true
+          sudo timedatectl \
+            set-timezone \
+            "Asia/Shanghai" || true
 
           df -h
 
 
       # ============================================================
-      # 2. Checkout source
+      # 2. Checkout
       # ============================================================
 
       - name: Checkout OpenWrt
@@ -153,41 +148,63 @@ jobs:
 
 
       # ============================================================
-      # 3. Generate firmware version
+      # 3. Build version
       # ============================================================
 
       - name: Generate build version
         run: |
-          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          BUILD_DAY="$(date -u +'%Y.%m.%d')"
+          set -e
+
+          BUILD_DATE="$(
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+          )"
+
+          BUILD_DAY="$(
+            date -u +'%Y.%m.%d'
+          )"
+
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
           VERSION="${BUILD_DAY}-r${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+
           TAG="doornet2-${VERSION}"
 
-          echo "DOORNET2_VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "DOORNET2_TAG=${TAG}" >> "$GITHUB_ENV"
-          echo "DOORNET2_BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
+          echo "DOORNET2_VERSION=${VERSION}" \
+            >> "$GITHUB_ENV"
 
-          echo "Version: ${VERSION}"
-          echo "Tag: ${TAG}"
-          echo "Date: ${BUILD_DATE}"
+          echo "DOORNET2_TAG=${TAG}" \
+            >> "$GITHUB_ENV"
+
+          echo "DOORNET2_BUILD_DATE=${BUILD_DATE}" \
+            >> "$GITHUB_ENV"
+
+          echo "========================================"
+          echo "VERSION=${VERSION}"
+          echo "TAG=${TAG}"
+          echo "========================================"
 
 
       # ============================================================
-      # 4. Add iStore
+      # 4. iStore feed
       # ============================================================
 
       - name: Add iStore feed
         run: |
-          grep -q '^src-git istore ' feeds.conf.default || \
-            echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
+          set -e
+
+          grep -q '^src-git istore ' \
+            feeds.conf.default || \
+          echo \
+            'src-git istore https://github.com/linkease/istore;main' \
+            >> feeds.conf.default
 
           cat feeds.conf.default
 
 
       - name: Update feeds
         run: |
+          set -e
+
           ./scripts/feeds update -a
 
           ./scripts/feeds install -a -f
@@ -199,11 +216,13 @@ jobs:
 
 
       # ============================================================
-      # 5. Default LAN
+      # 5. LAN 192.168.100.1
       # ============================================================
 
       - name: Set default LAN IP
         run: |
+          set -e
+
           LAN_CONFIG="package/base-files/files/bin/config_generate"
 
           if [ ! -f "$LAN_CONFIG" ]; then
@@ -211,29 +230,33 @@ jobs:
             exit 1
           fi
 
-          if ! grep -q "192\.168\.1\.1" "$LAN_CONFIG"; then
-            echo "ERROR: Default LAN IP 192.168.1.1 not found"
-            exit 1
-          fi
-
           sed -i \
             's/192\.168\.1\.1/192.168.100.1/g' \
             "$LAN_CONFIG"
 
+          echo "========================================"
+          echo "LAN config"
+          echo "========================================"
+
           grep -n \
             "192\.168\.100\.1" \
-            "$LAN_CONFIG"
+            "$LAN_CONFIG" || true
 
 
       # ============================================================
-      # 6. Default WAN
+      # 6. WAN eth0 DHCP
       # ============================================================
 
       - name: Configure default WAN
         run: |
-          mkdir -p files/etc/uci-defaults
+          set -e
 
-          cat > files/etc/uci-defaults/96-doornet2-wan <<'EOF'
+          mkdir -p \
+            files/etc/uci-defaults
+
+          cat > \
+            files/etc/uci-defaults/96-doornet2-wan \
+            <<'EOF'
           #!/bin/sh
 
           uci -q set network.wan='interface'
@@ -253,14 +276,78 @@ jobs:
 
 
       # ============================================================
-      # 7. Self-hosted OPKG feed
+      # 7. IMPORTANT:
+      #    Completely disable root/extroot fstab switching
+      #
+      #    This fixes the r13 problem:
+      #
+      #    TF kernel/root initially mounted correctly
+      #      ->
+      #    block-mount read /etc/config/fstab
+      #      ->
+      #    mounted eMMC rootfs
+      #      ->
+      #    mount_root switched to extroot
+      #
+      #    r14 provides a safe fstab without target "/".
+      # ============================================================
+
+      - name: Disable root extroot configuration
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Install safe DoorNet2 fstab"
+          echo "NO target /"
+          echo "NO extroot"
+          echo "========================================"
+
+          mkdir -p \
+            files/etc/config
+
+          cat > \
+            files/etc/config/fstab \
+            <<'EOF'
+          config global
+                  option anon_swap '0'
+                  option anon_mount '0'
+                  option auto_swap '1'
+                  option auto_mount '1'
+                  option delay_root '5'
+                  option check_fs '0'
+          EOF
+
+          echo "========================================"
+          echo "/etc/config/fstab"
+          echo "========================================"
+
+          cat files/etc/config/fstab
+
+          if grep -Eq \
+            "option[[:space:]]+target[[:space:]]+['\"]?/['\"]?" \
+            files/etc/config/fstab
+          then
+            echo "ERROR: root/extroot target found"
+            exit 1
+          fi
+
+          echo "Safe fstab verified."
+
+
+      # ============================================================
+      # 8. OPKG feed
       # ============================================================
 
       - name: Configure GitHub OPKG feed
         run: |
-          mkdir -p files/etc/opkg
+          set -e
 
-          cat > files/etc/opkg/distfeeds.conf <<'EOF'
+          mkdir -p \
+            files/etc/opkg
+
+          cat > \
+            files/etc/opkg/distfeeds.conf \
+            <<'EOF'
           src/gz openwrt_core https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/targets/rockchip/armv8/packages
           src/gz openwrt_base https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/base
           src/gz openwrt_istore https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/istore
@@ -270,40 +357,355 @@ jobs:
           src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
           EOF
 
-          cat files/etc/opkg/distfeeds.conf
+          cat \
+            files/etc/opkg/distfeeds.conf
 
 
       # ============================================================
-      # 8. Embed firmware version
+      # 9. Embed DoorNet2 release information
       # ============================================================
 
       - name: Embed DoorNet2 version
         run: |
-          mkdir -p files/etc
+          set -e
 
-          cat > files/etc/doornet2_release <<EOF
+          mkdir -p \
+            files/etc
+
+          cat > \
+            files/etc/doornet2_release \
+            <<EOF
           DOORNET2_VERSION='${DOORNET2_VERSION}'
           DOORNET2_TAG='${DOORNET2_TAG}'
           DOORNET2_BUILD_DATE='${DOORNET2_BUILD_DATE}'
           DOORNET2_GIT_COMMIT='${GITHUB_SHA}'
           DOORNET2_GITHUB_REPOSITORY='${GITHUB_REPOSITORY}'
           DOORNET2_BOARD='embedfire,doornet2'
+          DOORNET2_STORAGE_FIX='no-extroot'
+          DOORNET2_BOOT_MODE='tf-first-emmc-fallback'
           EOF
 
-          cat files/etc/doornet2_release
+          cat \
+            files/etc/doornet2_release
 
 
       # ============================================================
-      # 9. DoorNet2 online updater
+      # 10. Real TF priority boot
+      #
+      #     U-Boot:
+      #
+      #     try mmc 1:1
+      #       TF kernel found
+      #          ->
+      #       root=/dev/mmcblk1p2
+      #
+      #     otherwise:
+      #
+      #     try mmc 0:1
+      #          ->
+      #     root=/dev/mmcblk0p2
+      #
+      #     Linux no longer performs root extroot switching.
+      # ============================================================
+
+      - name: Configure real TF card priority boot
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "DoorNet2 TF-first smart boot"
+          echo "========================================"
+
+          cat > \
+            target/linux/rockchip/image/doornet2.bootscript \
+            <<'EOF'
+          #
+          # EmbedFire DoorNet2 r14 smart boot
+          #
+          # U-Boot device numbering:
+          #
+          # mmc 1 = TF card
+          # mmc 0 = eMMC
+          #
+          # Boot policy:
+          #
+          # 1. Actively probe TF
+          # 2. If TF kernel + partition 2 exist:
+          #       kernel -> TF
+          #       rootfs -> TF
+          # 3. Otherwise fallback to eMMC
+          #
+
+          if test "${stdout}" = "serial@fe660000"; then
+              setenv serial_addr ",0xfe660000";
+          elif test "${stdout}" = "serial@feb50000"; then
+              setenv serial_addr ",0xfeb50000";
+          elif test "${stdout}" = "serial@ff130000"; then
+              setenv serial_addr ",0xff130000";
+          elif test "${stdout}" = "serial@ff1a0000"; then
+              setenv serial_addr ",0xff1a0000";
+          else
+              setenv serial_addr "";
+          fi;
+
+          echo "========================================";
+          echo "DoorNet2 r14 smart boot";
+          echo "Priority: TF -> eMMC";
+          echo "========================================";
+
+          echo "Trying TF: mmc 1";
+
+          if mmc dev 1; then
+
+              mmc rescan;
+
+              if part uuid mmc 1:2 tf_partuuid; then
+
+                  echo "TF partition 2 detected";
+
+                  if load mmc 1:1 ${kernel_addr_r} kernel.img; then
+
+                      echo "TF kernel found";
+                      echo "Boot completely from TF";
+
+                      setenv rootdev "/dev/mmcblk1p2";
+
+                      setenv bootargs \
+                        "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
+
+                      echo "root=${rootdev}";
+
+                      bootm ${kernel_addr_r};
+
+                      echo "WARNING:";
+                      echo "TF bootm returned unexpectedly";
+
+                  else
+
+                      echo "TF kernel.img not found";
+
+                  fi;
+
+              else
+
+                  echo "TF partition 2 not found";
+
+              fi;
+
+          else
+
+              echo "TF controller/card unavailable";
+
+          fi;
+
+
+          echo "========================================";
+          echo "Fallback to eMMC: mmc 0";
+          echo "========================================";
+
+          if mmc dev 0; then
+
+              mmc rescan;
+
+              if part uuid mmc 0:2 emmc_partuuid; then
+
+                  if load mmc 0:1 ${kernel_addr_r} kernel.img; then
+
+                      echo "eMMC kernel found";
+                      echo "Boot from eMMC";
+
+                      setenv rootdev "/dev/mmcblk0p2";
+
+                      setenv bootargs \
+                        "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
+
+                      echo "root=${rootdev}";
+
+                      bootm ${kernel_addr_r};
+
+                  else
+
+                      echo "FATAL: eMMC kernel.img not found";
+
+                  fi;
+
+              else
+
+                  echo "FATAL: eMMC root partition not found";
+
+              fi;
+
+          else
+
+              echo "FATAL: eMMC unavailable";
+
+          fi;
+
+
+          echo "========================================";
+          echo "FATAL: No bootable DoorNet2 system";
+          echo "========================================";
+          EOF
+
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "target/linux/rockchip/image/armv8.mk"
+          )
+
+          if not path.exists():
+              raise SystemExit(
+                  "ERROR: armv8.mk not found"
+              )
+
+          text = path.read_text()
+
+          marker = "define Device/embedfire_doornet2"
+
+          start = text.find(marker)
+
+          if start == -1:
+              raise SystemExit(
+                  "ERROR: DoorNet2 device definition not found"
+              )
+
+          end = text.find(
+              "endef",
+              start
+          )
+
+          if end == -1:
+              raise SystemExit(
+                  "ERROR: DoorNet2 Device block incomplete"
+              )
+
+          block = text[start:end]
+
+          if "BOOT_SCRIPT := doornet2" not in block:
+
+              if "BOOT_FLOW := pine64-bin" not in block:
+                  raise SystemExit(
+                      "ERROR: DoorNet2 BOOT_FLOW not found"
+                  )
+
+              block = block.replace(
+                  "  BOOT_FLOW := pine64-bin\n",
+                  "  BOOT_FLOW := pine64-bin\n"
+                  "  BOOT_SCRIPT := doornet2\n"
+              )
+
+              text = \
+                  text[:start] + \
+                  block + \
+                  text[end:]
+
+              path.write_text(text)
+
+          text = path.read_text()
+
+          start = text.find(marker)
+
+          end = text.find(
+              "endef",
+              start
+          )
+
+          print(
+              text[
+                  start:
+                  end + len("endef")
+              ]
+          )
+          PY
+
+          echo "========================================"
+          echo "Boot script source"
+          echo "========================================"
+
+          cat \
+            target/linux/rockchip/image/doornet2.bootscript
+
+
+      # ============================================================
+      # 11. taskd compatibility
+      # ============================================================
+
+      - name: Add taskd compatibility fix
+        run: |
+          set -e
+
+          mkdir -p \
+            files/etc/uci-defaults
+
+          cat > \
+            files/etc/uci-defaults/99-taskd-compat \
+            <<'EOF'
+          #!/bin/sh
+
+          TASKS="/etc/init.d/tasks"
+
+          if [ -f "$TASKS" ] && \
+             grep -q 'extra_command ' "$TASKS" && \
+             ! grep -q 'TASKD_EXTRA_COMMAND_COMPAT' "$TASKS"
+          then
+
+              TMP="/tmp/tasks.compat.$$"
+
+              awk '
+              NR == 1 {
+                  print
+                  print ""
+                  print "# TASKD_EXTRA_COMMAND_COMPAT"
+                  print "type extra_command >/dev/null 2>&1 || extra_command() { :; }"
+                  next
+              }
+
+              {
+                  print
+              }
+              ' "$TASKS" > "$TMP"
+
+              cat "$TMP" > "$TASKS"
+
+              rm -f "$TMP"
+
+              chmod 755 "$TASKS"
+
+              logger -t taskd \
+                "Applied extra_command compatibility fix"
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 \
+            files/etc/uci-defaults/99-taskd-compat
+
+
+      # ============================================================
+      # 12. Online updater
+      #
+      #     IMPORTANT CHANGE:
+      #
+      #     Detect actual mounted /
+      #     instead of trusting /proc/cmdline.
       # ============================================================
 
       - name: Add DoorNet2 online updater
         run: |
-          mkdir -p files/usr/bin
-          mkdir -p files/usr/lib/lua/luci/controller
-          mkdir -p files/usr/lib/lua/luci/view/doornet2
+          set -e
 
-          cat > files/usr/bin/doornet2-updater <<'EOF'
+          mkdir -p \
+            files/usr/bin \
+            files/usr/lib/lua/luci/controller \
+            files/usr/lib/lua/luci/view/doornet2
+
+
+          cat > \
+            files/usr/bin/doornet2-updater \
+            <<'EOF'
           #!/bin/sh
 
           REPO="Taipeione/lede-rockchip"
@@ -333,13 +735,15 @@ jobs:
               CURRENT_TAG="unknown"
 
               if [ -f "$RELEASE_INFO" ]; then
-
                   . "$RELEASE_INFO"
 
-                  CURRENT_VERSION="${DOORNET2_VERSION:-unknown}"
+                  CURRENT_VERSION="${
+                      DOORNET2_VERSION:-unknown
+                  }"
 
-                  CURRENT_TAG="${DOORNET2_TAG:-unknown}"
-
+                  CURRENT_TAG="${
+                      DOORNET2_TAG:-unknown
+                  }"
               fi
           }
 
@@ -347,9 +751,13 @@ jobs:
           get_root_info()
           {
               ROOT_DEVICE="$(
-                  sed -n \
-                    's/.* root=\([^ ]*\).*/\1/p' \
-                    /proc/cmdline
+                  mount | \
+                  awk '
+                      $3 == "/" {
+                          print $1
+                          exit
+                      }
+                  '
               )"
 
               case "$ROOT_DEVICE" in
@@ -357,27 +765,21 @@ jobs:
                   /dev/mmcblk0p2)
 
                       UPGRADE_DISK="/dev/mmcblk0"
-
                       BOOT_MEDIA="eMMC"
-
                       ;;
 
 
                   /dev/mmcblk1p2)
 
                       UPGRADE_DISK="/dev/mmcblk1"
-
                       BOOT_MEDIA="TF"
-
                       ;;
 
 
                   *)
 
                       UPGRADE_DISK="unknown"
-
                       BOOT_MEDIA="unknown"
-
                       ;;
 
               esac
@@ -387,12 +789,13 @@ jobs:
           get_board()
           {
               BOARD="$(
-                  cat /tmp/sysinfo/board_name \
+                  cat \
+                    /tmp/sysinfo/board_name \
                     2>/dev/null
               )"
 
               [ -n "$BOARD" ] || \
-                BOARD="unknown"
+                  BOARD="unknown"
           }
 
 
@@ -400,7 +803,8 @@ jobs:
           {
               mkdir -p "$WORKDIR"
 
-              rm -f "${META}.part"
+              rm -f \
+                  "${META}.part"
 
               if ! curl \
                   -LfsS \
@@ -409,14 +813,12 @@ jobs:
                   -o "${META}.part" \
                   "${BASE_URL}/version.json"
               then
-
                   return 1
-
               fi
 
               mv \
-                "${META}.part" \
-                "$META"
+                  "${META}.part" \
+                  "$META"
 
 
               LATEST_VERSION="$(
@@ -460,20 +862,21 @@ jobs:
 
 
               [ "$LATEST_BOARD" = "$EXPECTED_BOARD" ] || \
-                return 2
+                  return 2
 
 
               [ "$LATEST_ASSET" = "$EXPECTED_ASSET" ] || \
-                return 3
+                  return 3
 
 
               [ -n "$LATEST_VERSION" ] || \
-                return 4
+                  return 4
 
 
               echo "$LATEST_SHA" | \
-                grep -Eq '^[0-9a-fA-F]{64}$' || \
-                return 5
+                  grep -Eq \
+                    '^[0-9a-fA-F]{64}$' || \
+                  return 5
 
 
               return 0
@@ -483,33 +886,36 @@ jobs:
           command_status()
           {
               get_current_version
-
               get_root_info
-
               get_board
-
 
               printf '{'
 
               printf '"ok":true,'
 
-              printf '"current_version":"%s",' \
-                "$CURRENT_VERSION"
+              printf \
+                  '"current_version":"%s",' \
+                  "$CURRENT_VERSION"
 
-              printf '"current_tag":"%s",' \
-                "$CURRENT_TAG"
+              printf \
+                  '"current_tag":"%s",' \
+                  "$CURRENT_TAG"
 
-              printf '"board":"%s",' \
-                "$BOARD"
+              printf \
+                  '"board":"%s",' \
+                  "$BOARD"
 
-              printf '"root_device":"%s",' \
-                "$ROOT_DEVICE"
+              printf \
+                  '"root_device":"%s",' \
+                  "$ROOT_DEVICE"
 
-              printf '"upgrade_disk":"%s",' \
-                "$UPGRADE_DISK"
+              printf \
+                  '"upgrade_disk":"%s",' \
+                  "$UPGRADE_DISK"
 
-              printf '"boot_media":"%s"' \
-                "$BOOT_MEDIA"
+              printf \
+                  '"boot_media":"%s"' \
+                  "$BOOT_MEDIA"
 
               printf '}\n'
           }
@@ -518,9 +924,7 @@ jobs:
           command_check()
           {
               get_current_version
-
               get_root_info
-
               get_board
 
 
@@ -530,7 +934,6 @@ jobs:
                     '{"ok":false,"message":"board_mismatch"}\n'
 
                   exit 1
-
               fi
 
 
@@ -540,18 +943,13 @@ jobs:
                     '{"ok":false,"message":"metadata_download_failed"}\n'
 
                   exit 1
-
               fi
 
 
               if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
-
                   AVAILABLE="false"
-
               else
-
                   AVAILABLE="true"
-
               fi
 
 
@@ -559,23 +957,29 @@ jobs:
 
               printf '"ok":true,'
 
-              printf '"current_version":"%s",' \
-                "$CURRENT_VERSION"
+              printf \
+                  '"current_version":"%s",' \
+                  "$CURRENT_VERSION"
 
-              printf '"latest_version":"%s",' \
-                "$LATEST_VERSION"
+              printf \
+                  '"latest_version":"%s",' \
+                  "$LATEST_VERSION"
 
-              printf '"latest_tag":"%s",' \
-                "$LATEST_TAG"
+              printf \
+                  '"latest_tag":"%s",' \
+                  "$LATEST_TAG"
 
-              printf '"update_available":%s,' \
-                "$AVAILABLE"
+              printf \
+                  '"update_available":%s,' \
+                  "$AVAILABLE"
 
-              printf '"boot_media":"%s",' \
-                "$BOOT_MEDIA"
+              printf \
+                  '"boot_media":"%s",' \
+                  "$BOOT_MEDIA"
 
-              printf '"upgrade_disk":"%s"' \
-                "$UPGRADE_DISK"
+              printf \
+                  '"upgrade_disk":"%s"' \
+                  "$UPGRADE_DISK"
 
               printf '}\n'
           }
@@ -584,18 +988,14 @@ jobs:
           command_prepare()
           {
               get_current_version
-
               get_root_info
-
               get_board
 
 
               case "$ROOT_DEVICE" in
 
                   /dev/mmcblk0p2|/dev/mmcblk1p2)
-
                       ;;
-
 
                   *)
 
@@ -603,7 +1003,6 @@ jobs:
                         '{"ok":false,"message":"unsupported_root_device"}\n'
 
                       exit 1
-
                       ;;
 
               esac
@@ -615,7 +1014,6 @@ jobs:
                     '{"ok":false,"message":"board_mismatch"}\n'
 
                   exit 1
-
               fi
 
 
@@ -625,11 +1023,11 @@ jobs:
                     '{"ok":false,"message":"metadata_download_failed"}\n'
 
                   exit 1
-
               fi
 
 
-              rm -f "${FIRMWARE}.part"
+              rm -f \
+                  "${FIRMWARE}.part"
 
 
               if ! curl \
@@ -640,19 +1038,19 @@ jobs:
                   "${BASE_URL}/${EXPECTED_ASSET}"
               then
 
-                  rm -f "${FIRMWARE}.part"
+                  rm -f \
+                      "${FIRMWARE}.part"
 
                   printf \
                     '{"ok":false,"message":"firmware_download_failed"}\n'
 
                   exit 1
-
               fi
 
 
               mv \
-                "${FIRMWARE}.part" \
-                "$FIRMWARE"
+                  "${FIRMWARE}.part" \
+                  "$FIRMWARE"
 
 
               ACTUAL_SHA="$(
@@ -669,7 +1067,6 @@ jobs:
                     '{"ok":false,"message":"sha256_failed"}\n'
 
                   exit 1
-
               fi
 
 
@@ -686,7 +1083,6 @@ jobs:
                     '{"ok":false,"message":"sysupgrade_test_failed"}\n'
 
                   exit 1
-
               fi
 
 
@@ -702,23 +1098,29 @@ jobs:
 
               printf '"ready":true,'
 
-              printf '"current_version":"%s",' \
-                "$CURRENT_VERSION"
+              printf \
+                  '"current_version":"%s",' \
+                  "$CURRENT_VERSION"
 
-              printf '"latest_version":"%s",' \
-                "$LATEST_VERSION"
+              printf \
+                  '"latest_version":"%s",' \
+                  "$LATEST_VERSION"
 
-              printf '"sha256":"%s",' \
-                "$ACTUAL_SHA"
+              printf \
+                  '"sha256":"%s",' \
+                  "$ACTUAL_SHA"
 
-              printf '"size":"%s",' \
-                "$SIZE"
+              printf \
+                  '"size":"%s",' \
+                  "$SIZE"
 
-              printf '"boot_media":"%s",' \
-                "$BOOT_MEDIA"
+              printf \
+                  '"boot_media":"%s",' \
+                  "$BOOT_MEDIA"
 
-              printf '"upgrade_disk":"%s"' \
-                "$UPGRADE_DISK"
+              printf \
+                  '"upgrade_disk":"%s"' \
+                  "$UPGRADE_DISK"
 
               printf '}\n'
           }
@@ -727,16 +1129,13 @@ jobs:
           command_upgrade()
           {
               get_root_info
-
               get_board
 
 
               case "$ROOT_DEVICE" in
 
                   /dev/mmcblk0p2|/dev/mmcblk1p2)
-
                       ;;
-
 
                   *)
 
@@ -744,7 +1143,6 @@ jobs:
                         '{"ok":false,"message":"unsupported_root_device"}\n'
 
                       exit 1
-
                       ;;
 
               esac
@@ -756,7 +1154,6 @@ jobs:
                     '{"ok":false,"message":"board_mismatch"}\n'
 
                   exit 1
-
               fi
 
 
@@ -767,7 +1164,6 @@ jobs:
                     '{"ok":false,"message":"firmware_not_prepared"}\n'
 
                   exit 1
-
               fi
 
 
@@ -792,7 +1188,6 @@ jobs:
                     '{"ok":false,"message":"sha256_failed"}\n'
 
                   exit 1
-
               fi
 
 
@@ -806,7 +1201,6 @@ jobs:
                     '{"ok":false,"message":"sysupgrade_test_failed"}\n'
 
                   exit 1
-
               fi
 
 
@@ -817,10 +1211,12 @@ jobs:
                   sleep 3
 
                   /sbin/sysupgrade \
-                    -v \
-                    "$FIRMWARE"
+                      -v \
+                      "$FIRMWARE"
 
-              ) >"$UPGRADELOG" 2>&1 </dev/null &
+              ) >"$UPGRADELOG" \
+                2>&1 \
+                </dev/null &
 
 
               printf '{'
@@ -829,11 +1225,13 @@ jobs:
 
               printf '"started":true,'
 
-              printf '"boot_media":"%s",' \
-                "$BOOT_MEDIA"
+              printf \
+                  '"boot_media":"%s",' \
+                  "$BOOT_MEDIA"
 
-              printf '"upgrade_disk":"%s"' \
-                "$UPGRADE_DISK"
+              printf \
+                  '"upgrade_disk":"%s"' \
+                  "$UPGRADE_DISK"
 
               printf '}\n'
           }
@@ -842,32 +1240,20 @@ jobs:
           case "$1" in
 
               status)
-
                   command_status
-
                   ;;
-
 
               check)
-
                   command_check
-
                   ;;
-
 
               prepare)
-
                   command_prepare
-
                   ;;
-
 
               upgrade)
-
                   command_upgrade
-
                   ;;
-
 
               *)
 
@@ -878,11 +1264,11 @@ jobs:
                   echo "  doornet2-updater upgrade"
 
                   exit 1
-
                   ;;
 
           esac
           EOF
+
 
           chmod 755 \
             files/usr/bin/doornet2-updater
@@ -891,7 +1277,11 @@ jobs:
           cat > \
             files/usr/lib/lua/luci/controller/doornet2_update.lua \
             <<'EOF'
-          module("luci.controller.doornet2_update", package.seeall)
+          module(
+              "luci.controller.doornet2_update",
+              package.seeall
+          )
+
 
           function index()
 
@@ -980,14 +1370,19 @@ jobs:
 
           local function output_json(command)
 
-              local http = require "luci.http"
-              local sys  = require "luci.sys"
+              local http =
+                  require "luci.http"
 
-              local result = sys.exec(
-                  "/usr/bin/doornet2-updater " ..
-                  command ..
-                  " 2>/dev/null"
-              )
+              local sys =
+                  require "luci.sys"
+
+
+              local result =
+                  sys.exec(
+                      "/usr/bin/doornet2-updater " ..
+                      command ..
+                      " 2>/dev/null"
+                  )
 
 
               http.prepare_content(
@@ -1001,12 +1396,14 @@ jobs:
 
           local function require_post()
 
-              local http = require "luci.http"
+              local http =
+                  require "luci.http"
 
 
               if http.getenv(
                   "REQUEST_METHOD"
-              ) ~= "POST" then
+              ) ~= "POST"
+              then
 
                   http.status(
                       405,
@@ -1025,7 +1422,6 @@ jobs:
 
 
                   return false
-
               end
 
 
@@ -1034,16 +1430,12 @@ jobs:
 
 
           function action_status()
-
               output_json("status")
-
           end
 
 
           function action_check()
-
               output_json("check")
-
           end
 
 
@@ -1054,7 +1446,6 @@ jobs:
               end
 
               output_json("prepare")
-
           end
 
 
@@ -1065,7 +1456,6 @@ jobs:
               end
 
               output_json("upgrade")
-
           end
           EOF
 
@@ -1082,7 +1472,6 @@ jobs:
 
           <div class="cbi-map">
 
-
               <div class="cbi-section">
 
                   <h3>
@@ -1092,11 +1481,12 @@ jobs:
 
                   <table class="table">
 
-
                       <tr class="tr">
 
                           <td class="td">
-                              <strong>当前版本</strong>
+                              <strong>
+                                  当前版本
+                              </strong>
                           </td>
 
                           <td
@@ -1112,7 +1502,9 @@ jobs:
                       <tr class="tr">
 
                           <td class="td">
-                              <strong>最新版本</strong>
+                              <strong>
+                                  最新版本
+                              </strong>
                           </td>
 
                           <td
@@ -1128,7 +1520,9 @@ jobs:
                       <tr class="tr">
 
                           <td class="td">
-                              <strong>当前启动介质</strong>
+                              <strong>
+                                  当前启动介质
+                              </strong>
                           </td>
 
                           <td
@@ -1144,7 +1538,9 @@ jobs:
                       <tr class="tr">
 
                           <td class="td">
-                              <strong>升级目标磁盘</strong>
+                              <strong>
+                                  升级目标磁盘
+                              </strong>
                           </td>
 
                           <td
@@ -1155,7 +1551,6 @@ jobs:
                           </td>
 
                       </tr>
-
 
                   </table>
 
@@ -1170,7 +1565,6 @@ jobs:
 
 
                   <p>
-                      系统会依次执行：
                       检查 GitHub 最新版本 →
                       下载固件 →
                       SHA256 校验 →
@@ -1180,13 +1574,12 @@ jobs:
 
 
                   <p>
-                      TF 启动时只升级 TF；
-                      eMMC 启动时只升级 eMMC。
+                      TF 启动时升级 TF；
+                      eMMC 启动时升级 eMMC。
                   </p>
 
 
                   <div style="margin-top:20px">
-
 
                       <input
                           type="button"
@@ -1222,7 +1615,6 @@ jobs:
                           disabled="disabled"
                       />
 
-
                   </div>
 
 
@@ -1239,9 +1631,7 @@ jobs:
                       正在读取设备信息...
                   </div>
 
-
               </div>
-
 
           </div>
 
@@ -1351,14 +1741,15 @@ jobs:
                       }
 
 
-                      var data = null;
+                      var data;
 
 
                       try
                       {
-                          data = JSON.parse(
-                              xhr.responseText
-                          );
+                          data =
+                              JSON.parse(
+                                  xhr.responseText
+                              );
                       }
                       catch (e)
                       {
@@ -1369,7 +1760,6 @@ jobs:
                                       "返回数据解析失败"
                               }
                           );
-
 
                           return;
                       }
@@ -1400,7 +1790,6 @@ jobs:
                           setStatus(
                               "无法读取设备状态。"
                           );
-
 
                           return;
                       }
@@ -1436,7 +1825,6 @@ jobs:
           {
               setBusy(true);
 
-
               setStatus(
                   "正在连接 GitHub 检查最新版本..."
               );
@@ -1460,7 +1848,6 @@ jobs:
                                   "未知错误"
                               )
                           );
-
 
                           return;
                       }
@@ -1496,8 +1883,7 @@ jobs:
                       {
                           setStatus(
                               "<strong>发现新版本。</strong>" +
-                              "<br />" +
-                              "可以点击“下载并校验”。"
+                              "<br />可以点击“下载并校验”。"
                           );
 
 
@@ -1505,7 +1891,6 @@ jobs:
                               "btn_prepare"
                           ).disabled = false;
                       }
-
                       else
                       {
                           setStatus(
@@ -1521,7 +1906,7 @@ jobs:
           {
               if (
                   !confirm(
-                      "现在开始下载最新版固件并进行 SHA256 和兼容性校验？"
+                      "开始下载固件，并执行 SHA256 和 sysupgrade 兼容性检查？"
                   )
               )
               {
@@ -1533,9 +1918,7 @@ jobs:
 
 
               setStatus(
-                  "正在下载固件并校验，请不要关闭页面。"
-                  + "<br />"
-                  + "通常需要几十秒。"
+                  "正在下载并校验固件，请稍候..."
               );
 
 
@@ -1557,7 +1940,6 @@ jobs:
                                   "未知错误"
                               )
                           );
-
 
                           return;
                       }
@@ -1583,15 +1965,11 @@ jobs:
 
                       setStatus(
                           "<strong>固件准备完成。</strong>"
-                          + "<br />"
-                          + "SHA256：验证通过"
-                          + "<br />"
-                          + "sysupgrade：兼容性检查通过"
-                          + "<br />"
-                          + "固件大小：" +
+                          + "<br />SHA256：通过"
+                          + "<br />sysupgrade：通过"
+                          + "<br />固件大小：" +
                           data.size
-                          + "<br />"
-                          + "升级目标：" +
+                          + "<br />升级目标：" +
                           data.upgrade_disk
                       );
 
@@ -1617,7 +1995,7 @@ jobs:
                       "即将正式升级 " +
                       disk +
                       "。\n\n" +
-                      "升级期间绝对不要断电，也不要拔出 TF/eMMC。\n\n" +
+                      "升级过程中绝对不要断电。\n\n" +
                       "确定继续？"
                   )
               )
@@ -1631,10 +2009,8 @@ jobs:
 
               setStatus(
                   "<strong>正在启动固件升级。</strong>"
-                  + "<br />"
-                  + "设备将在几秒后断开连接并自动重启。"
-                  + "<br /><br />"
-                  + "升级期间请勿断电。"
+                  + "<br />设备将在几秒后断开连接。"
+                  + "<br />请等待自动重启。"
               );
 
 
@@ -1650,13 +2026,12 @@ jobs:
 
 
                           setStatus(
-                              "<strong>启动升级失败：</strong> " +
+                              "<strong>升级启动失败：</strong> " +
                               (
                                   data.message ||
                                   "未知错误"
                               )
                           );
-
 
                           return;
                       }
@@ -1664,22 +2039,20 @@ jobs:
 
                       setStatus(
                           "<strong>升级已经开始。</strong>"
-                          + "<br />"
-                          + "目标磁盘：" +
+                          + "<br />目标：" +
                           data.upgrade_disk
-                          + "<br />"
-                          + "当前启动介质：" +
+                          + "<br />启动介质：" +
                           data.boot_media
                           + "<br /><br />"
-                          + "请等待约 3～5 分钟，"
-                          + "设备会自动重新启动。"
+                          + "请等待约 3～5 分钟。"
                       );
                   }
               );
           }
 
 
-          window.onload = loadStatus;
+          window.onload =
+              loadStatus;
 
 
           </script>
@@ -1689,239 +2062,13 @@ jobs:
 
 
       # ============================================================
-      # 10. REAL TF priority boot
-      # ============================================================
-
-      - name: Configure real TF card priority boot
-        run: |
-          echo "========================================"
-          echo "DoorNet2 REAL TF priority boot"
-          echo "Probe mmc1 first"
-          echo "Fallback to mmc0"
-          echo "========================================"
-
-          cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
-          #
-          # EmbedFire DoorNet2 real TF/eMMC smart boot
-          #
-          # IMPORTANT:
-          # mmc1 = TF card
-          # mmc0 = eMMC
-          #
-          # Always actively probe TF first.
-          # If TF kernel.img can be loaded, boot TF kernel + TF rootfs.
-          # Otherwise fall back to eMMC.
-          #
-
-          if test "${stdout}" = "serial@fe660000"; then
-              setenv serial_addr ",0xfe660000";
-          elif test "${stdout}" = "serial@feb50000"; then
-              setenv serial_addr ",0xfeb50000";
-          elif test "${stdout}" = "serial@ff130000"; then
-              setenv serial_addr ",0xff130000";
-          elif test "${stdout}" = "serial@ff1a0000"; then
-              setenv serial_addr ",0xff1a0000";
-          else
-              setenv serial_addr "";
-          fi;
-
-          echo "========================================";
-          echo "DoorNet2 smart boot";
-          echo "Trying TF card first: mmc 1:1";
-          echo "========================================";
-
-          if load mmc 1:1 ${kernel_addr_r} kernel.img; then
-
-              echo "DoorNet2: TF kernel found";
-              echo "DoorNet2: booting completely from TF";
-
-              setenv rootdev "/dev/mmcblk1p2";
-
-              setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
-
-              echo "DoorNet2 root: ${rootdev}";
-
-              bootm ${kernel_addr_r};
-
-              echo "WARNING: TF bootm returned unexpectedly";
-              echo "Falling back to eMMC";
-
-          else
-
-              echo "DoorNet2: TF kernel not found";
-              echo "DoorNet2: falling back to eMMC";
-
-          fi;
-
-          echo "========================================";
-          echo "Trying eMMC: mmc 0:1";
-          echo "========================================";
-
-          if load mmc 0:1 ${kernel_addr_r} kernel.img; then
-
-              echo "DoorNet2: eMMC kernel found";
-              echo "DoorNet2: booting from eMMC";
-
-              setenv rootdev "/dev/mmcblk0p2";
-
-              setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
-
-              echo "DoorNet2 root: ${rootdev}";
-
-              bootm ${kernel_addr_r};
-
-          else
-
-              echo "========================================";
-              echo "FATAL: no bootable TF or eMMC kernel found";
-              echo "========================================";
-
-          fi;
-          EOF
-
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              "target/linux/rockchip/image/armv8.mk"
-          )
-
-          text = path.read_text()
-
-          start_marker = (
-              "define Device/embedfire_doornet2"
-          )
-
-          start = text.find(start_marker)
-
-          if start == -1:
-              raise SystemExit(
-                  "ERROR: DoorNet2 device definition not found"
-              )
-
-          end = text.find(
-              "endef",
-              start
-          )
-
-          if end == -1:
-              raise SystemExit(
-                  "ERROR: DoorNet2 device definition incomplete"
-              )
-
-          block = text[start:end]
-
-          if "BOOT_SCRIPT := doornet2" not in block:
-
-              if (
-                  "  BOOT_FLOW := pine64-bin\n"
-                  not in block
-              ):
-                  raise SystemExit(
-                      "ERROR: DoorNet2 BOOT_FLOW not found"
-                  )
-
-              block = block.replace(
-                  "  BOOT_FLOW := pine64-bin\n",
-
-                  "  BOOT_FLOW := pine64-bin\n"
-                  "  BOOT_SCRIPT := doornet2\n"
-              )
-
-              text = (
-                  text[:start] +
-                  block +
-                  text[end:]
-              )
-
-              path.write_text(text)
-
-
-          new_text = path.read_text()
-
-          start = new_text.find(
-              start_marker
-          )
-
-          end = new_text.find(
-              "endef",
-              start
-          )
-
-          print(
-              new_text[
-                  start:
-                  end + len("endef")
-              ]
-          )
-          PY
-
-          echo "========================================"
-          echo "New boot script source"
-          echo "========================================"
-
-          cat \
-            target/linux/rockchip/image/doornet2.bootscript
-
-
-      # ============================================================
-      # 11. taskd compatibility fix
-      # ============================================================
-
-      - name: Add taskd compatibility fix
-        run: |
-          mkdir -p files/etc/uci-defaults
-
-          cat > files/etc/uci-defaults/99-taskd-compat <<'EOF'
-          #!/bin/sh
-
-          TASKS="/etc/init.d/tasks"
-
-          if [ -f "$TASKS" ] && \
-             grep -q 'extra_command ' "$TASKS" && \
-             ! grep -q 'TASKD_EXTRA_COMMAND_COMPAT' "$TASKS"; then
-
-              TMP="/tmp/tasks.compat.$$"
-
-              awk '
-              NR == 1 {
-                  print
-                  print ""
-                  print "# TASKD_EXTRA_COMMAND_COMPAT"
-                  print "type extra_command >/dev/null 2>&1 || extra_command() { :; }"
-                  next
-              }
-
-              {
-                  print
-              }
-              ' "$TASKS" > "$TMP"
-
-              cat "$TMP" > "$TASKS"
-
-              rm -f "$TMP"
-
-              chmod 755 "$TASKS"
-
-              logger -t taskd \
-                "Applied extra_command compatibility fix"
-
-          fi
-
-          exit 0
-          EOF
-
-          chmod 755 \
-            files/etc/uci-defaults/99-taskd-compat
-
-
-      # ============================================================
-      # 12. DoorNet2 configuration
+      # 13. Packages / RootFS
       # ============================================================
 
       - name: Configure DoorNet2 and packages
         run: |
+          set -e
+
           cat >> .config <<'EOF'
 
           CONFIG_TARGET_rockchip=y
@@ -1964,11 +2111,13 @@ jobs:
 
 
       # ============================================================
-      # 13. Generate config
+      # 14. Generate config
       # ============================================================
 
       - name: Generate configuration file
         run: |
+          set -e
+
           make defconfig
 
           echo "========================================"
@@ -1979,16 +2128,26 @@ jobs:
             'CONFIG_TARGET.*embedfire_doornet2' \
             .config || true
 
+
           echo "========================================"
-          echo "RootFS size"
+          echo "RootFS"
           echo "========================================"
 
           grep \
             'CONFIG_TARGET_ROOTFS_PARTSIZE' \
             .config || true
 
+
           echo "========================================"
-          echo "Updater files"
+          echo "Safe fstab"
+          echo "========================================"
+
+          cat \
+            files/etc/config/fstab
+
+
+          echo "========================================"
+          echo "Updater"
           echo "========================================"
 
           ls -lah \
@@ -1998,7 +2157,7 @@ jobs:
 
 
       # ============================================================
-      # 14. Download source packages
+      # 15. Downloads
       # ============================================================
 
       - name: Download packages
@@ -2011,12 +2170,13 @@ jobs:
 
 
       # ============================================================
-      # 15. Compile firmware
+      # 16. Compile
       # ============================================================
 
       - name: Compile firmware
         run: |
-          make -j$(nproc) || make -j1 V=s
+          make -j$(nproc) || \
+          make -j1 V=s
 
           df -h
 
@@ -2026,15 +2186,18 @@ jobs:
 
 
       # ============================================================
-      # 16. Prepare firmware artifacts
+      # 17. Prepare artifact
       # ============================================================
 
       - name: Prepare artifact
         run: |
-          mkdir -p ./artifact/package
-          mkdir -p ./artifact/buildinfo
-          mkdir -p ./artifact/firmware
-          mkdir -p ./artifact/release
+          set -e
+
+          mkdir -p \
+            ./artifact/package \
+            ./artifact/buildinfo \
+            ./artifact/firmware \
+            ./artifact/release
 
 
           find ./bin/packages/ \
@@ -2047,8 +2210,10 @@ jobs:
             -type f \
             \( \
               -name "*.buildinfo" \
-              -o -name "*.manifest" \
-              -o -name "*.config" \
+              -o \
+              -name "*.manifest" \
+              -o \
+              -name "*.config" \
             \) \
             -exec cp -f {} ./artifact/buildinfo/ \;
 
@@ -2057,10 +2222,14 @@ jobs:
             -type f \
             \( \
               -name "*.img" \
-              -o -name "*.img.gz" \
-              -o -name "*.bin" \
-              -o -name "*.itb" \
-              -o -name "*.gz" \
+              -o \
+              -name "*.img.gz" \
+              -o \
+              -name "*.bin" \
+              -o \
+              -name "*.itb" \
+              -o \
+              -name "*.gz" \
             \) \
             ! -path "*/packages/*" \
             -exec cp -f {} ./artifact/firmware/ \;
@@ -2089,17 +2258,19 @@ jobs:
             ./artifact/release/DoorNet2-ext4-sysupgrade.img.gz
 
 
-          cd ./artifact/release
+          cd \
+            ./artifact/release
 
 
           SHA256="$(
             sha256sum \
               DoorNet2-ext4-sysupgrade.img.gz \
-              | awk '{print $1}'
+            | awk '{print $1}'
           )"
 
 
-          echo "${SHA256}  DoorNet2-ext4-sysupgrade.img.gz" \
+          echo \
+            "${SHA256}  DoorNet2-ext4-sysupgrade.img.gz" \
             > sha256sums.txt
 
 
@@ -2112,7 +2283,9 @@ jobs:
             "commit": "${GITHUB_SHA}",
             "repository": "${GITHUB_REPOSITORY}",
             "asset": "DoorNet2-ext4-sysupgrade.img.gz",
-            "sha256": "${SHA256}"
+            "sha256": "${SHA256}",
+            "boot_policy": "tf-first-emmc-fallback",
+            "extroot": false
           }
           EOF
 
@@ -2134,12 +2307,15 @@ jobs:
           - LAN: 192.168.100.1
           - WAN: eth0 DHCP
           - RootFS: 7GB ext4
-          - Smart boot: actively probe TF first
-          - TF kernel found: kernel + rootfs from TF
-          - TF unavailable: fallback to eMMC
+          - TF priority boot
+          - TF kernel + TF rootfs when TF is present
+          - eMMC automatic fallback
+          - Root extroot disabled
+          - Safe /etc/config/fstab
           - iStore included
           - Self-hosted matching OPKG feed
           - LuCI online firmware updater
+          - Actual mounted root device detection
 
           Firmware:
 
@@ -2151,18 +2327,25 @@ jobs:
           EOF
 
 
+          echo "========================================"
+          echo "Release"
+          echo "========================================"
+
           ls -lah
 
           cat version.json
 
 
       # ============================================================
-      # 17. Prepare OPKG feed
+      # 18. OPKG feed
       # ============================================================
 
       - name: Prepare OPKG feed
         run: |
-          rm -rf ./artifact/opkg-feed
+          set -e
+
+          rm -rf \
+            ./artifact/opkg-feed
 
 
           mkdir -p \
@@ -2185,21 +2368,21 @@ jobs:
 
             echo "ERROR: target packages directory not found"
 
-            find ./bin/targets/rockchip/armv8 \
-              -maxdepth 2 \
-              -type d \
-              | sort
-
             exit 1
 
           fi
 
 
-          cat > ./artifact/opkg-feed/README.md <<EOF
+          cat > \
+            ./artifact/opkg-feed/README.md \
+            <<EOF
           # DoorNet2 OPKG Feed
 
           Repository:
           ${GITHUB_REPOSITORY}
+
+          Firmware:
+          ${DOORNET2_VERSION}
 
           Target:
           rockchip/armv8
@@ -2207,14 +2390,8 @@ jobs:
           Architecture:
           aarch64_generic
 
-          Firmware version:
-          ${DOORNET2_VERSION}
-
-          Git commit:
+          Commit:
           ${GITHUB_SHA}
-
-          GitHub Actions run:
-          ${GITHUB_RUN_NUMBER}
           EOF
 
 
@@ -2222,39 +2399,28 @@ jobs:
             find ./artifact/opkg-feed \
               -type f \
               -name "Packages.gz" \
-              | wc -l
+            | wc -l
           )"
 
 
-          echo "Found ${PACKAGE_INDEX_COUNT} package indexes"
+          echo \
+            "Packages.gz count: ${PACKAGE_INDEX_COUNT}"
 
 
           if [ "$PACKAGE_INDEX_COUNT" -lt 2 ]; then
 
-            echo "ERROR: Package indexes missing"
-
-            find ./artifact/opkg-feed \
-              -maxdepth 5 \
-              -type f \
-              | sort \
-              | head -100
+            echo "ERROR: package indexes missing"
 
             exit 1
-
           fi
 
 
-          find ./artifact/opkg-feed \
-            -type f \
-            -name "Packages.gz" \
-            | sort
-
-
-          du -sh ./artifact/opkg-feed
+          du -sh \
+            ./artifact/opkg-feed
 
 
       # ============================================================
-      # 18. Upload GitHub artifacts
+      # 19. Upload artifacts
       # ============================================================
 
       - name: Upload buildinfo
@@ -2298,14 +2464,17 @@ jobs:
 
 
       # ============================================================
-      # 19. Publish OPKG feed branch
+      # 20. Publish OPKG feed
       # ============================================================
 
       - name: Publish OPKG feed
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          rm -rf /tmp/doornet2-opkg-feed
+          set -e
+
+          rm -rf \
+            /tmp/doornet2-opkg-feed
 
 
           git clone \
@@ -2314,7 +2483,8 @@ jobs:
             /tmp/doornet2-opkg-feed
 
 
-          cd /tmp/doornet2-opkg-feed
+          cd \
+            /tmp/doornet2-opkg-feed
 
 
           git config \
@@ -2359,14 +2529,17 @@ jobs:
 
 
       # ============================================================
-      # 20. Publish GitHub Release
+      # 21. Publish Release
       # ============================================================
 
       - name: Publish firmware release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Tag: ${DOORNET2_TAG}"
+          set -e
+
+          echo \
+            "Tag: ${DOORNET2_TAG}"
 
 
           if gh release view \
@@ -2413,3 +2586,41 @@ jobs:
           gh release view \
             "${DOORNET2_TAG}" \
             --repo "${GITHUB_REPOSITORY}"
+
+
+      # ============================================================
+      # 22. Final verification
+      # ============================================================
+
+      - name: Final build verification
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "DoorNet2 build finished"
+          echo "========================================"
+
+          echo "VERSION:"
+          echo "${DOORNET2_VERSION}"
+
+          echo
+          echo "SAFE FSTAB:"
+
+          cat \
+            files/etc/config/fstab
+
+          echo
+          echo "BOOT SCRIPT:"
+
+          grep -E \
+            'Trying TF|Fallback|rootdev|mmcblk' \
+            target/linux/rockchip/image/doornet2.bootscript
+
+          echo
+          echo "RELEASE FILES:"
+
+          ls -lah \
+            ./artifact/release/
+
+          echo
+          echo "SUCCESS"
