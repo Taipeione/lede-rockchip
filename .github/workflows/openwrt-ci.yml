@@ -8,8 +8,8 @@
 # - LAN: 192.168.100.1
 # - WAN: eth0 DHCP
 # - RootFS: 7GB ext4
-# - TF inserted -> boot completely from TF
-# - TF removed  -> boot from eMMC
+# - TF inserted -> prefer TF kernel + TF rootfs
+# - TF unavailable -> fallback to eMMC kernel + eMMC rootfs
 # - iStore
 # - taskd compatibility fix
 # - Self-hosted GitHub OPKG feed
@@ -141,10 +141,6 @@ jobs:
 
           sudo timedatectl set-timezone "Asia/Shanghai" || true
 
-          echo "========================================"
-          echo "Disk space"
-          echo "========================================"
-
           df -h
 
 
@@ -173,12 +169,9 @@ jobs:
           echo "DOORNET2_TAG=${TAG}" >> "$GITHUB_ENV"
           echo "DOORNET2_BUILD_DATE=${BUILD_DATE}" >> "$GITHUB_ENV"
 
-          echo "========================================"
-          echo "DoorNet2 version"
-          echo "========================================"
           echo "Version: ${VERSION}"
-          echo "Tag:     ${TAG}"
-          echo "Date:    ${BUILD_DATE}"
+          echo "Tag: ${TAG}"
+          echo "Date: ${BUILD_DATE}"
 
 
       # ============================================================
@@ -187,10 +180,6 @@ jobs:
 
       - name: Add iStore feed
         run: |
-          echo "========================================"
-          echo "Add iStore feed"
-          echo "========================================"
-
           grep -q '^src-git istore ' feeds.conf.default || \
             echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
 
@@ -199,10 +188,6 @@ jobs:
 
       - name: Update feeds
         run: |
-          echo "========================================"
-          echo "Update feeds"
-          echo "========================================"
-
           ./scripts/feeds update -a
 
           ./scripts/feeds install -a -f
@@ -221,10 +206,6 @@ jobs:
         run: |
           LAN_CONFIG="package/base-files/files/bin/config_generate"
 
-          echo "========================================"
-          echo "Set LAN IP: 192.168.100.1"
-          echo "========================================"
-
           if [ ! -f "$LAN_CONFIG" ]; then
             echo "ERROR: Cannot find $LAN_CONFIG"
             exit 1
@@ -239,11 +220,6 @@ jobs:
             's/192\.168\.1\.1/192.168.100.1/g' \
             "$LAN_CONFIG"
 
-          if ! grep -q "192\.168\.100\.1" "$LAN_CONFIG"; then
-            echo "ERROR: LAN IP modification failed"
-            exit 1
-          fi
-
           grep -n \
             "192\.168\.100\.1" \
             "$LAN_CONFIG"
@@ -255,10 +231,6 @@ jobs:
 
       - name: Configure default WAN
         run: |
-          echo "========================================"
-          echo "WAN = eth0 DHCP"
-          echo "========================================"
-
           mkdir -p files/etc/uci-defaults
 
           cat > files/etc/uci-defaults/96-doornet2-wan <<'EOF'
@@ -286,10 +258,6 @@ jobs:
 
       - name: Configure GitHub OPKG feed
         run: |
-          echo "========================================"
-          echo "Configure GitHub OPKG feed"
-          echo "========================================"
-
           mkdir -p files/etc/opkg
 
           cat > files/etc/opkg/distfeeds.conf <<'EOF'
@@ -311,10 +279,6 @@ jobs:
 
       - name: Embed DoorNet2 version
         run: |
-          echo "========================================"
-          echo "Embed DoorNet2 version"
-          echo "========================================"
-
           mkdir -p files/etc
 
           cat > files/etc/doornet2_release <<EOF
@@ -335,18 +299,9 @@ jobs:
 
       - name: Add DoorNet2 online updater
         run: |
-          echo "========================================"
-          echo "Add DoorNet2 LuCI Online Updater"
-          echo "========================================"
-
           mkdir -p files/usr/bin
           mkdir -p files/usr/lib/lua/luci/controller
           mkdir -p files/usr/lib/lua/luci/view/doornet2
-
-
-          # ========================================================
-          # Backend updater
-          # ========================================================
 
           cat > files/usr/bin/doornet2-updater <<'EOF'
           #!/bin/sh
@@ -929,14 +884,9 @@ jobs:
           esac
           EOF
 
-
           chmod 755 \
             files/usr/bin/doornet2-updater
 
-
-          # ========================================================
-          # LuCI controller
-          # ========================================================
 
           cat > \
             files/usr/lib/lua/luci/controller/doornet2_update.lua \
@@ -1119,10 +1069,6 @@ jobs:
           end
           EOF
 
-
-          # ========================================================
-          # LuCI page
-          # ========================================================
 
           cat > \
             files/usr/lib/lua/luci/view/doornet2/update.htm \
@@ -1743,83 +1689,94 @@ jobs:
 
 
       # ============================================================
-      # 10. TF / eMMC smart boot
+      # 10. REAL TF priority boot
       # ============================================================
 
-      - name: Configure TF card priority boot
+      - name: Configure real TF card priority boot
         run: |
           echo "========================================"
-          echo "DoorNet2 smart boot"
-          echo "TF inserted -> TF"
-          echo "TF removed  -> eMMC"
+          echo "DoorNet2 REAL TF priority boot"
+          echo "Probe mmc1 first"
+          echo "Fallback to mmc0"
           echo "========================================"
 
           cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
           #
-          # EmbedFire DoorNet2 TF/eMMC smart boot
+          # EmbedFire DoorNet2 real TF/eMMC smart boot
+          #
+          # IMPORTANT:
+          # mmc1 = TF card
+          # mmc0 = eMMC
+          #
+          # Always actively probe TF first.
+          # If TF kernel.img can be loaded, boot TF kernel + TF rootfs.
+          # Otherwise fall back to eMMC.
           #
 
-          if test "${devtype}" = "mmc"; then
+          if test "${stdout}" = "serial@fe660000"; then
+              setenv serial_addr ",0xfe660000";
+          elif test "${stdout}" = "serial@feb50000"; then
+              setenv serial_addr ",0xfeb50000";
+          elif test "${stdout}" = "serial@ff130000"; then
+              setenv serial_addr ",0xff130000";
+          elif test "${stdout}" = "serial@ff1a0000"; then
+              setenv serial_addr ",0xff1a0000";
+          else
+              setenv serial_addr "";
+          fi;
 
-              if test "${devnum}" = "1"; then
+          echo "========================================";
+          echo "DoorNet2 smart boot";
+          echo "Trying TF card first: mmc 1:1";
+          echo "========================================";
 
-                  echo "DoorNet2: boot completely from TF card";
+          if load mmc 1:1 ${kernel_addr_r} kernel.img; then
 
-                  setenv rootdev "/dev/mmcblk1p2";
+              echo "DoorNet2: TF kernel found";
+              echo "DoorNet2: booting completely from TF";
 
+              setenv rootdev "/dev/mmcblk1p2";
 
-              elif test "${devnum}" = "0"; then
+              setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
 
-                  echo "DoorNet2: boot completely from eMMC";
+              echo "DoorNet2 root: ${rootdev}";
 
-                  setenv rootdev "/dev/mmcblk0p2";
+              bootm ${kernel_addr_r};
 
-
-              else
-
-                  part uuid ${devtype} ${devnum}:2 uuid;
-
-                  setenv rootdev "PARTUUID=${uuid}";
-
-              fi;
-
+              echo "WARNING: TF bootm returned unexpectedly";
+              echo "Falling back to eMMC";
 
           else
 
-              part uuid ${devtype} ${devnum}:2 uuid;
-
-              setenv rootdev "PARTUUID=${uuid}";
-
-          fi;
-
-
-          if test "${stdout}" = "serial@fe660000"; then
-
-              setenv serial_addr ",0xfe660000";
-
-          elif test "${stdout}" = "serial@feb50000"; then
-
-              setenv serial_addr ",0xfeb50000";
-
-          elif test "${stdout}" = "serial@ff130000"; then
-
-              setenv serial_addr ",0xff130000";
-
-          elif test "${stdout}" = "serial@ff1a0000"; then
-
-              setenv serial_addr ",0xff1a0000";
+              echo "DoorNet2: TF kernel not found";
+              echo "DoorNet2: falling back to eMMC";
 
           fi;
 
+          echo "========================================";
+          echo "Trying eMMC: mmc 0:1";
+          echo "========================================";
 
-          setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
+          if load mmc 0:1 ${kernel_addr_r} kernel.img; then
 
+              echo "DoorNet2: eMMC kernel found";
+              echo "DoorNet2: booting from eMMC";
 
-          load ${devtype} ${devnum}:1 \
-            ${kernel_addr_r} kernel.img;
+              setenv rootdev "/dev/mmcblk0p2";
 
+              setenv bootargs "coherent_pool=2M console=ttyS2,1500000 earlycon=uart8250,mmio32${serial_addr} root=${rootdev} rw rootwait";
 
-          bootm ${kernel_addr_r};
+              echo "DoorNet2 root: ${rootdev}";
+
+              bootm ${kernel_addr_r};
+
+          else
+
+              echo "========================================";
+              echo "FATAL: no bootable TF or eMMC kernel found";
+              echo "========================================";
+
+          fi;
           EOF
 
 
@@ -1900,6 +1857,13 @@ jobs:
           )
           PY
 
+          echo "========================================"
+          echo "New boot script source"
+          echo "========================================"
+
+          cat \
+            target/linux/rockchip/image/doornet2.bootscript
+
 
       # ============================================================
       # 11. taskd compatibility fix
@@ -1907,10 +1871,6 @@ jobs:
 
       - name: Add taskd compatibility fix
         run: |
-          echo "========================================"
-          echo "Add taskd compatibility fix"
-          echo "========================================"
-
           mkdir -p files/etc/uci-defaults
 
           cat > files/etc/uci-defaults/99-taskd-compat <<'EOF'
@@ -1970,9 +1930,6 @@ jobs:
 
           CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_embedfire_doornet2=y
 
-          #
-          # Partition size
-          #
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=7168
 
@@ -1980,23 +1937,14 @@ jobs:
           CONFIG_TARGET_ROOTFS_EXT4FS=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
 
-          #
-          # iStore
-          #
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
 
-          #
-          # DoorNet2 updater
-          #
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_ca-bundle=y
           CONFIG_PACKAGE_ca-certificates=y
           CONFIG_PACKAGE_jsonfilter=y
 
-          #
-          # Disk tools
-          #
           CONFIG_PACKAGE_lsblk=y
           CONFIG_PACKAGE_fdisk=y
           CONFIG_PACKAGE_sfdisk=y
@@ -2005,9 +1953,6 @@ jobs:
           CONFIG_PACKAGE_partx-utils=y
           CONFIG_PACKAGE_mount-utils=y
 
-          #
-          # ext4 tools
-          #
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG_PACKAGE_resize2fs=y
           CONFIG_PACKAGE_tune2fs=y
@@ -2034,7 +1979,6 @@ jobs:
             'CONFIG_TARGET.*embedfire_doornet2' \
             .config || true
 
-
           echo "========================================"
           echo "RootFS size"
           echo "========================================"
@@ -2042,7 +1986,6 @@ jobs:
           grep \
             'CONFIG_TARGET_ROOTFS_PARTSIZE' \
             .config || true
-
 
           echo "========================================"
           echo "Updater files"
@@ -2075,16 +2018,7 @@ jobs:
         run: |
           make -j$(nproc) || make -j1 V=s
 
-          echo "========================================"
-          echo "Disk space"
-          echo "========================================"
-
           df -h
-
-
-          echo "========================================"
-          echo "Firmware files"
-          echo "========================================"
 
           find ./bin/targets/ \
             -type f \
@@ -2097,10 +2031,6 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          echo "========================================"
-          echo "Prepare DoorNet2 artifacts"
-          echo "========================================"
-
           mkdir -p ./artifact/package
           mkdir -p ./artifact/buildinfo
           mkdir -p ./artifact/firmware
@@ -2154,10 +2084,6 @@ jobs:
           fi
 
 
-          echo "Firmware source:"
-          echo "$SOURCE_FW"
-
-
           cp -f \
             "$SOURCE_FW" \
             ./artifact/release/DoorNet2-ext4-sysupgrade.img.gz
@@ -2208,8 +2134,9 @@ jobs:
           - LAN: 192.168.100.1
           - WAN: eth0 DHCP
           - RootFS: 7GB ext4
-          - TF inserted: boot completely from TF
-          - TF removed: boot from eMMC
+          - Smart boot: actively probe TF first
+          - TF kernel found: kernel + rootfs from TF
+          - TF unavailable: fallback to eMMC
           - iStore included
           - Self-hosted matching OPKG feed
           - LuCI online firmware updater
@@ -2224,10 +2151,6 @@ jobs:
           EOF
 
 
-          echo "========================================"
-          echo "Release files"
-          echo "========================================"
-
           ls -lah
 
           cat version.json
@@ -2239,10 +2162,6 @@ jobs:
 
       - name: Prepare OPKG feed
         run: |
-          echo "========================================"
-          echo "Prepare OPKG feed"
-          echo "========================================"
-
           rm -rf ./artifact/opkg-feed
 
 
@@ -2265,8 +2184,6 @@ jobs:
           else
 
             echo "ERROR: target packages directory not found"
-
-            echo "Available directories:"
 
             find ./bin/targets/rockchip/armv8 \
               -maxdepth 2 \
@@ -2325,11 +2242,6 @@ jobs:
             exit 1
 
           fi
-
-
-          echo "========================================"
-          echo "OPKG feed ready"
-          echo "========================================"
 
 
           find ./artifact/opkg-feed \
@@ -2393,11 +2305,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          echo "========================================"
-          echo "Publish OPKG feed"
-          echo "========================================"
-
-
           rm -rf /tmp/doornet2-opkg-feed
 
 
@@ -2451,11 +2358,6 @@ jobs:
             opkg-feed
 
 
-          echo "========================================"
-          echo "OPKG feed published successfully"
-          echo "========================================"
-
-
       # ============================================================
       # 20. Publish GitHub Release
       # ============================================================
@@ -2464,10 +2366,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "========================================"
-          echo "Publish DoorNet2 Release"
-          echo "========================================"
-
           echo "Tag: ${DOORNET2_TAG}"
 
 
@@ -2476,10 +2374,6 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             >/dev/null 2>&1
           then
-
-            echo "Release already exists."
-            echo "Updating release assets..."
-
 
             gh release upload \
               "${DOORNET2_TAG}" \
@@ -2514,11 +2408,6 @@ jobs:
               "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
 
           fi
-
-
-          echo "========================================"
-          echo "Release information"
-          echo "========================================"
 
 
           gh release view \
