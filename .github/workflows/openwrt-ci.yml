@@ -1,23 +1,22 @@
 #
 # EmbedFire DoorNet2 OpenWrt + iStore
 #
-# Features:
-# - LAN IP: 192.168.100.1
-# - WAN: eth0 DHCP
-# - 7GB ext4 rootfs
-# - TF/SD priority boot
-# - No TF -> fallback to eMMC
-# - iStore
-# - Self-hosted OPKG feed
-# - GitHub Releases
-# - LuCI online firmware updater
-# - SHA256 verification
-# - sysupgrade compatibility test
-# - Disk management utilities
-# - taskd compatibility fix
-#
 # Base source:
 # https://github.com/DHDAXCW/lede-rockchip
+#
+# Features:
+# - LAN: 192.168.100.1
+# - WAN: eth0 DHCP
+# - RootFS: 7GB ext4
+# - TF inserted -> boot completely from TF
+# - TF removed  -> boot from eMMC
+# - iStore
+# - taskd compatibility fix
+# - Self-hosted GitHub OPKG feed
+# - GitHub Releases
+# - LuCI DoorNet2 online firmware updater
+# - SHA256 verification
+# - sysupgrade compatibility test
 #
 
 name: DoorNet2-OpenWrt-iStore
@@ -29,6 +28,7 @@ permissions:
   contents: write
 
 jobs:
+
   build_openwrt:
 
     name: Build DoorNet2 OpenWrt Firmware
@@ -157,7 +157,7 @@ jobs:
 
 
       # ============================================================
-      # 3. Build version
+      # 3. Generate firmware version
       # ============================================================
 
       - name: Generate build version
@@ -182,7 +182,7 @@ jobs:
 
 
       # ============================================================
-      # 4. iStore
+      # 4. Add iStore
       # ============================================================
 
       - name: Add iStore feed
@@ -199,14 +199,22 @@ jobs:
 
       - name: Update feeds
         run: |
+          echo "========================================"
+          echo "Update feeds"
+          echo "========================================"
+
           ./scripts/feeds update -a
+
           ./scripts/feeds install -a -f
 
-          ./scripts/feeds install -d y -p istore luci-app-store
+          ./scripts/feeds install \
+            -d y \
+            -p istore \
+            luci-app-store
 
 
       # ============================================================
-      # 5. LAN
+      # 5. Default LAN
       # ============================================================
 
       - name: Set default LAN IP
@@ -236,11 +244,13 @@ jobs:
             exit 1
           fi
 
-          grep -n "192\.168\.100\.1" "$LAN_CONFIG"
+          grep -n \
+            "192\.168\.100\.1" \
+            "$LAN_CONFIG"
 
 
       # ============================================================
-      # 6. WAN
+      # 6. Default WAN
       # ============================================================
 
       - name: Configure default WAN
@@ -266,11 +276,12 @@ jobs:
           exit 0
           EOF
 
-          chmod 755 files/etc/uci-defaults/96-doornet2-wan
+          chmod 755 \
+            files/etc/uci-defaults/96-doornet2-wan
 
 
       # ============================================================
-      # 7. OPKG GitHub feed
+      # 7. Self-hosted OPKG feed
       # ============================================================
 
       - name: Configure GitHub OPKG feed
@@ -295,7 +306,7 @@ jobs:
 
 
       # ============================================================
-      # 8. Embed release information
+      # 8. Embed firmware version
       # ============================================================
 
       - name: Embed DoorNet2 version
@@ -319,7 +330,7 @@ jobs:
 
 
       # ============================================================
-      # 9. DoorNet2 online updater backend + LuCI
+      # 9. DoorNet2 online updater
       # ============================================================
 
       - name: Add DoorNet2 online updater
@@ -333,9 +344,9 @@ jobs:
           mkdir -p files/usr/lib/lua/luci/view/doornet2
 
 
-          # --------------------------------------------------------
+          # ========================================================
           # Backend updater
-          # --------------------------------------------------------
+          # ========================================================
 
           cat > files/usr/bin/doornet2-updater <<'EOF'
           #!/bin/sh
@@ -371,6 +382,7 @@ jobs:
                   . "$RELEASE_INFO"
 
                   CURRENT_VERSION="${DOORNET2_VERSION:-unknown}"
+
                   CURRENT_TAG="${DOORNET2_TAG:-unknown}"
 
               fi
@@ -390,20 +402,25 @@ jobs:
                   /dev/mmcblk0p2)
 
                       UPGRADE_DISK="/dev/mmcblk0"
+
                       BOOT_MEDIA="eMMC"
 
                       ;;
 
+
                   /dev/mmcblk1p2)
 
                       UPGRADE_DISK="/dev/mmcblk1"
+
                       BOOT_MEDIA="TF"
 
                       ;;
 
+
                   *)
 
                       UPGRADE_DISK="unknown"
+
                       BOOT_MEDIA="unknown"
 
                       ;;
@@ -415,10 +432,12 @@ jobs:
           get_board()
           {
               BOARD="$(
-                  cat /tmp/sysinfo/board_name 2>/dev/null
+                  cat /tmp/sysinfo/board_name \
+                    2>/dev/null
               )"
 
-              [ -n "$BOARD" ] || BOARD="unknown"
+              [ -n "$BOARD" ] || \
+                BOARD="unknown"
           }
 
 
@@ -440,7 +459,10 @@ jobs:
 
               fi
 
-              mv "${META}.part" "$META"
+              mv \
+                "${META}.part" \
+                "$META"
+
 
               LATEST_VERSION="$(
                   jsonfilter \
@@ -449,12 +471,14 @@ jobs:
                     2>/dev/null
               )"
 
+
               LATEST_TAG="$(
                   jsonfilter \
                     -i "$META" \
                     -e '@.tag' \
                     2>/dev/null
               )"
+
 
               LATEST_BOARD="$(
                   jsonfilter \
@@ -463,12 +487,14 @@ jobs:
                     2>/dev/null
               )"
 
+
               LATEST_ASSET="$(
                   jsonfilter \
                     -i "$META" \
                     -e '@.asset' \
                     2>/dev/null
               )"
+
 
               LATEST_SHA="$(
                   jsonfilter \
@@ -477,14 +503,23 @@ jobs:
                     2>/dev/null
               )"
 
-              [ "$LATEST_BOARD" = "$EXPECTED_BOARD" ] || return 2
 
-              [ "$LATEST_ASSET" = "$EXPECTED_ASSET" ] || return 3
+              [ "$LATEST_BOARD" = "$EXPECTED_BOARD" ] || \
+                return 2
 
-              [ -n "$LATEST_VERSION" ] || return 4
+
+              [ "$LATEST_ASSET" = "$EXPECTED_ASSET" ] || \
+                return 3
+
+
+              [ -n "$LATEST_VERSION" ] || \
+                return 4
+
 
               echo "$LATEST_SHA" | \
-                grep -Eq '^[0-9a-fA-F]{64}$' || return 5
+                grep -Eq '^[0-9a-fA-F]{64}$' || \
+                return 5
+
 
               return 0
           }
@@ -497,6 +532,7 @@ jobs:
               get_root_info
 
               get_board
+
 
               printf '{'
 
@@ -531,6 +567,7 @@ jobs:
               get_root_info
 
               get_board
+
 
               if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
 
@@ -604,6 +641,7 @@ jobs:
 
                       ;;
 
+
                   *)
 
                       printf \
@@ -657,7 +695,9 @@ jobs:
               fi
 
 
-              mv "${FIRMWARE}.part" "$FIRMWARE"
+              mv \
+                "${FIRMWARE}.part" \
+                "$FIRMWARE"
 
 
               ACTUAL_SHA="$(
@@ -741,6 +781,7 @@ jobs:
                   /dev/mmcblk0p2|/dev/mmcblk1p2)
 
                       ;;
+
 
                   *)
 
@@ -851,11 +892,13 @@ jobs:
 
                   ;;
 
+
               check)
 
                   command_check
 
                   ;;
+
 
               prepare)
 
@@ -863,11 +906,13 @@ jobs:
 
                   ;;
 
+
               upgrade)
 
                   command_upgrade
 
                   ;;
+
 
               *)
 
@@ -884,12 +929,14 @@ jobs:
           esac
           EOF
 
-          chmod 755 files/usr/bin/doornet2-updater
+
+          chmod 755 \
+            files/usr/bin/doornet2-updater
 
 
-          # --------------------------------------------------------
+          # ========================================================
           # LuCI controller
-          # --------------------------------------------------------
+          # ========================================================
 
           cat > \
             files/usr/lib/lua/luci/controller/doornet2_update.lua \
@@ -992,9 +1039,11 @@ jobs:
                   " 2>/dev/null"
               )
 
+
               http.prepare_content(
                   "application/json"
               )
+
 
               http.write(result)
           end
@@ -1003,6 +1052,7 @@ jobs:
           local function require_post()
 
               local http = require "luci.http"
+
 
               if http.getenv(
                   "REQUEST_METHOD"
@@ -1013,16 +1063,21 @@ jobs:
                       "Method Not Allowed"
                   )
 
+
                   http.prepare_content(
                       "application/json"
                   )
+
 
                   http.write(
                       '{"ok":false,"message":"POST required"}'
                   )
 
+
                   return false
+
               end
+
 
               return true
           end
@@ -1065,9 +1120,9 @@ jobs:
           EOF
 
 
-          # --------------------------------------------------------
-          # LuCI view
-          # --------------------------------------------------------
+          # ========================================================
+          # LuCI page
+          # ========================================================
 
           cat > \
             files/usr/lib/lua/luci/view/doornet2/update.htm \
@@ -1090,6 +1145,7 @@ jobs:
 
 
                   <table class="table">
+
 
                       <tr class="tr">
 
@@ -1153,6 +1209,7 @@ jobs:
                           </td>
 
                       </tr>
+
 
                   </table>
 
@@ -1235,6 +1292,7 @@ jobs:
                   >
                       正在读取设备信息...
                   </div>
+
 
               </div>
 
@@ -1366,6 +1424,7 @@ jobs:
                               }
                           );
 
+
                           return;
                       }
 
@@ -1395,6 +1454,7 @@ jobs:
                           setStatus(
                               "无法读取设备状态。"
                           );
+
 
                           return;
                       }
@@ -1455,6 +1515,7 @@ jobs:
                               )
                           );
 
+
                           return;
                       }
 
@@ -1498,6 +1559,7 @@ jobs:
                               "btn_prepare"
                           ).disabled = false;
                       }
+
                       else
                       {
                           setStatus(
@@ -1549,6 +1611,7 @@ jobs:
                                   "未知错误"
                               )
                           );
+
 
                           return;
                       }
@@ -1647,6 +1710,7 @@ jobs:
                                   "未知错误"
                               )
                           );
+
 
                           return;
                       }
@@ -1752,7 +1816,7 @@ jobs:
 
 
           load ${devtype} ${devnum}:1 \
-              ${kernel_addr_r} kernel.img;
+            ${kernel_addr_r} kernel.img;
 
 
           bootm ${kernel_addr_r};
@@ -1837,21 +1901,8 @@ jobs:
           PY
 
 
-          if ! grep -A8 \
-            "define Device/embedfire_doornet2" \
-            target/linux/rockchip/image/armv8.mk | \
-            grep -q "BOOT_SCRIPT := doornet2"
-          then
-
-            echo "ERROR: BOOT_SCRIPT not enabled"
-
-            exit 1
-
-          fi
-
-
       # ============================================================
-      # 11. taskd fix
+      # 11. taskd compatibility fix
       # ============================================================
 
       - name: Add taskd compatibility fix
@@ -1869,8 +1920,7 @@ jobs:
 
           if [ -f "$TASKS" ] && \
              grep -q 'extra_command ' "$TASKS" && \
-             ! grep -q 'TASKD_EXTRA_COMMAND_COMPAT' "$TASKS"
-          then
+             ! grep -q 'TASKD_EXTRA_COMMAND_COMPAT' "$TASKS"; then
 
               TMP="/tmp/tasks.compat.$$"
 
@@ -1907,7 +1957,7 @@ jobs:
 
 
       # ============================================================
-      # 12. OpenWrt config
+      # 12. DoorNet2 configuration
       # ============================================================
 
       - name: Configure DoorNet2 and packages
@@ -1937,7 +1987,7 @@ jobs:
           CONFIG_PACKAGE_luci-compat=y
 
           #
-          # Online updater
+          # DoorNet2 updater
           #
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_ca-bundle=y
@@ -1956,15 +2006,12 @@ jobs:
           CONFIG_PACKAGE_mount-utils=y
 
           #
-          # Ext4 tools
+          # ext4 tools
           #
           CONFIG_PACKAGE_e2fsprogs=y
           CONFIG_PACKAGE_resize2fs=y
           CONFIG_PACKAGE_tune2fs=y
 
-          #
-          # OpenWrt storage
-          #
           CONFIG_PACKAGE_block-mount=y
           CONFIG_PACKAGE_kmod-fs-ext4=y
 
@@ -1989,7 +2036,7 @@ jobs:
 
 
           echo "========================================"
-          echo "RootFS"
+          echo "RootFS size"
           echo "========================================"
 
           grep \
@@ -1998,16 +2045,7 @@ jobs:
 
 
           echo "========================================"
-          echo "Online updater"
-          echo "========================================"
-
-          grep -E \
-            'CONFIG_PACKAGE_(curl|ca-bundle|ca-certificates|jsonfilter)' \
-            .config || true
-
-
-          echo "========================================"
-          echo "Online updater files"
+          echo "Updater files"
           echo "========================================"
 
           ls -lah \
@@ -2017,7 +2055,7 @@ jobs:
 
 
       # ============================================================
-      # 14. Download packages
+      # 14. Download source packages
       # ============================================================
 
       - name: Download packages
@@ -2030,7 +2068,7 @@ jobs:
 
 
       # ============================================================
-      # 15. Compile
+      # 15. Compile firmware
       # ============================================================
 
       - name: Compile firmware
@@ -2043,6 +2081,7 @@ jobs:
 
           df -h
 
+
           echo "========================================"
           echo "Firmware files"
           echo "========================================"
@@ -2053,11 +2092,15 @@ jobs:
 
 
       # ============================================================
-      # 16. Prepare normal artifacts + release
+      # 16. Prepare firmware artifacts
       # ============================================================
 
       - name: Prepare artifact
         run: |
+          echo "========================================"
+          echo "Prepare DoorNet2 artifacts"
+          echo "========================================"
+
           mkdir -p ./artifact/package
           mkdir -p ./artifact/buildinfo
           mkdir -p ./artifact/firmware
@@ -2112,7 +2155,6 @@ jobs:
 
 
           echo "Firmware source:"
-
           echo "$SOURCE_FW"
 
 
@@ -2214,9 +2256,7 @@ jobs:
             ./artifact/opkg-feed/packages/
 
 
-          if [
-            -d "./bin/targets/rockchip/armv8/packages"
-          ]; then
+          if [ -d "./bin/targets/rockchip/armv8/packages" ]; then
 
             cp -a \
               ./bin/targets/rockchip/armv8/packages \
@@ -2225,6 +2265,13 @@ jobs:
           else
 
             echo "ERROR: target packages directory not found"
+
+            echo "Available directories:"
+
+            find ./bin/targets/rockchip/armv8 \
+              -maxdepth 2 \
+              -type d \
+              | sort
 
             exit 1
 
@@ -2265,22 +2312,37 @@ jobs:
           echo "Found ${PACKAGE_INDEX_COUNT} package indexes"
 
 
-          if [
-            "$PACKAGE_INDEX_COUNT" -lt 2
-          ]; then
+          if [ "$PACKAGE_INDEX_COUNT" -lt 2 ]; then
 
             echo "ERROR: Package indexes missing"
+
+            find ./artifact/opkg-feed \
+              -maxdepth 5 \
+              -type f \
+              | sort \
+              | head -100
 
             exit 1
 
           fi
 
 
+          echo "========================================"
+          echo "OPKG feed ready"
+          echo "========================================"
+
+
+          find ./artifact/opkg-feed \
+            -type f \
+            -name "Packages.gz" \
+            | sort
+
+
           du -sh ./artifact/opkg-feed
 
 
       # ============================================================
-      # 18. Upload artifacts
+      # 18. Upload GitHub artifacts
       # ============================================================
 
       - name: Upload buildinfo
@@ -2416,7 +2478,7 @@ jobs:
           then
 
             echo "Release already exists."
-            echo "Updating assets..."
+            echo "Updating release assets..."
 
 
             gh release upload \
@@ -2433,7 +2495,8 @@ jobs:
               "${DOORNET2_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "DoorNet2 ${DOORNET2_VERSION}" \
-              --notes-file "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+              --notes-file \
+              "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
 
 
           else
@@ -2447,7 +2510,8 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
               --title "DoorNet2 ${DOORNET2_VERSION}" \
-              --notes-file "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
+              --notes-file \
+              "${GITHUB_WORKSPACE}/artifact/release/release-notes.md"
 
           fi
 
