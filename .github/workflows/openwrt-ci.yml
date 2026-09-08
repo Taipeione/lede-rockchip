@@ -171,7 +171,7 @@ jobs:
 
 
       # ============================================================
-      # 5. LAN 192.168.100.1
+      # 5. LAN
       # ============================================================
 
       - name: Set default LAN IP
@@ -219,14 +219,7 @@ jobs:
 
 
       # ============================================================
-      # 7. Fix extroot
-      #
-      # IMPORTANT:
-      # r13 was proved to boot TF correctly.
-      # The old fstab then switched "/" back to eMMC via extroot.
-      #
-      # r15 keeps only the global fstab section.
-      # There must NEVER be target '/' here.
+      # 7. Disable extroot
       # ============================================================
 
       - name: Disable root extroot configuration
@@ -283,7 +276,7 @@ jobs:
 
 
       # ============================================================
-      # 9. Embed release information
+      # 9. Release information
       # ============================================================
 
       - name: Embed DoorNet2 version
@@ -301,30 +294,17 @@ jobs:
           DOORNET2_BOARD='embedfire,doornet2'
           DOORNET2_BOOT_MODE='tf-first-emmc-fallback'
           DOORNET2_STORAGE_FIX='no-extroot'
+          DOORNET2_UPDATER='target-guard-v1'
           EOF
 
           cat files/etc/doornet2_release
 
 
       # ============================================================
-      # 10. TF priority boot
+      # 10. Proven r15 boot logic
       #
       # IMPORTANT:
-      #
-      # This is intentionally the SIMPLE r13 boot method.
-      #
-      # DO NOT add:
-      #   mmc dev
-      #   mmc rescan
-      #   part uuid
-      #
-      # TF:
-      #   load mmc 1:1 kernel.img
-      #   root=/dev/mmcblk1p2
-      #
-      # fallback:
-      #   load mmc 0:1 kernel.img
-      #   root=/dev/mmcblk0p2
+      # Do not add mmc dev / mmc rescan / part uuid
       # ============================================================
 
       - name: Configure proven TF card priority boot
@@ -333,17 +313,17 @@ jobs:
 
           cat > target/linux/rockchip/image/doornet2.bootscript <<'EOF'
           #
-          # EmbedFire DoorNet2 r15 smart boot
+          # EmbedFire DoorNet2 smart boot
           #
-          # Proven r13 method:
+          # Proven stable method:
           #
-          # TF card first:
-          #   U-Boot mmc 1:1
-          #   Linux root /dev/mmcblk1p2
+          # TF:
+          #   load mmc 1:1 kernel.img
+          #   root=/dev/mmcblk1p2
           #
           # eMMC fallback:
-          #   U-Boot mmc 0:1
-          #   Linux root /dev/mmcblk0p2
+          #   load mmc 0:1 kernel.img
+          #   root=/dev/mmcblk0p2
           #
 
           if test "${stdout}" = "serial@fe660000"; then
@@ -359,7 +339,7 @@ jobs:
           fi;
 
           echo "========================================";
-          echo "DoorNet2 r15 smart boot";
+          echo "DoorNet2 smart boot";
           echo "Priority: TF -> eMMC";
           echo "========================================";
 
@@ -472,21 +452,20 @@ jobs:
 
 
           echo "===== BOOT SCRIPT ====="
-
           cat target/linux/rockchip/image/doornet2.bootscript
 
 
-          echo "===== VERIFY NO R14 COMMANDS ====="
+          echo "===== VERIFY ====="
 
           if grep -Eq \
             '^[[:space:]]*(mmc dev|mmc rescan|part uuid)' \
             target/linux/rockchip/image/doornet2.bootscript
           then
-              echo "ERROR: unsupported r14 U-Boot commands remain"
+              echo "ERROR: unsupported U-Boot commands found"
               exit 1
           fi
 
-          echo "r13-style boot script verified."
+          echo "Stable boot script verified."
 
 
       # ============================================================
@@ -540,7 +519,7 @@ jobs:
 
 
       # ============================================================
-      # 12. Online updater
+      # 12. DoorNet2 updater
       # ============================================================
 
       - name: Add DoorNet2 online updater
@@ -555,6 +534,9 @@ jobs:
 
           cat > files/usr/bin/doornet2-updater <<'EOF'
           #!/bin/sh
+
+          # LuCI/rpcd may run with a restricted PATH.
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
           REPO="Taipeione/lede-rockchip"
 
@@ -593,16 +575,54 @@ jobs:
           }
 
 
+          # ---------------------------------------------------------
+          # Authoritative boot media detection
+          #
+          # r15+ has extroot disabled.
+          # Therefore root= from U-Boot is authoritative.
+          # ---------------------------------------------------------
+
           get_root_info()
           {
-              ROOT_DEVICE="$(
-                  mount | awk '
-                      $3 == "/" {
-                          print $1
-                          exit
-                      }
-                  '
-              )"
+              ROOT_DEVICE=""
+              CMDLINE=""
+
+              if [ -r /proc/cmdline ]; then
+
+                  IFS= read -r CMDLINE < /proc/cmdline
+
+                  for ARG in $CMDLINE; do
+
+                      case "$ARG" in
+
+                          root=/dev/mmcblk0p2|root=/dev/mmcblk1p2)
+
+                              ROOT_DEVICE="${ARG#root=}"
+                              break
+                              ;;
+
+                      esac
+
+                  done
+
+              fi
+
+
+              # Fallback only if cmdline did not provide expected root.
+              if [ -z "$ROOT_DEVICE" ]; then
+
+                  ROOT_DEVICE="$(
+                      /bin/mount 2>/dev/null |
+                      awk '
+                          $3 == "/" {
+                              print $1
+                              exit
+                          }
+                      '
+                  )"
+
+              fi
+
 
               case "$ROOT_DEVICE" in
 
@@ -630,13 +650,110 @@ jobs:
 
           get_board()
           {
-              BOARD="$(
-                  cat /tmp/sysinfo/board_name \
-                    2>/dev/null
-              )"
+              BOARD="unknown"
 
-              [ -n "$BOARD" ] || \
-                  BOARD="unknown"
+              if [ -r /tmp/sysinfo/board_name ]; then
+
+                  IFS= read -r BOARD < /tmp/sysinfo/board_name
+
+                  [ -n "$BOARD" ] || BOARD="unknown"
+
+              fi
+          }
+
+
+          # ---------------------------------------------------------
+          # Safety guard
+          #
+          # Verify OpenWrt's OWN sysupgrade target agrees with
+          # DoorNet2 current boot media.
+          #
+          # TF:
+          #   expected /dev/mmcblk1
+          #   OpenWrt diskdev must be mmcblk1
+          #
+          # eMMC:
+          #   expected /dev/mmcblk0
+          #   OpenWrt diskdev must be mmcblk0
+          #
+          # Any mismatch = refuse upgrade.
+          # ---------------------------------------------------------
+
+          verify_sysupgrade_target()
+          {
+              SYSUPGRADE_DISK="unknown"
+              TARGET_GUARD_MESSAGE="unknown"
+
+              get_root_info
+
+
+              case "$UPGRADE_DISK" in
+
+                  /dev/mmcblk0)
+                      EXPECTED_DISKDEV="mmcblk0"
+                      ;;
+
+                  /dev/mmcblk1)
+                      EXPECTED_DISKDEV="mmcblk1"
+                      ;;
+
+                  *)
+                      TARGET_GUARD_MESSAGE="unsupported_root_device"
+                      return 10
+                      ;;
+
+              esac
+
+
+              if [ ! -r /lib/functions.sh ]; then
+                  TARGET_GUARD_MESSAGE="functions_missing"
+                  return 11
+              fi
+
+
+              if [ ! -r /lib/upgrade/common.sh ]; then
+                  TARGET_GUARD_MESSAGE="upgrade_common_missing"
+                  return 12
+              fi
+
+
+              . /lib/functions.sh
+              . /lib/upgrade/common.sh
+
+
+              unset diskdev
+
+
+              if ! export_bootdevice >/dev/null 2>&1; then
+
+                  TARGET_GUARD_MESSAGE="export_bootdevice_failed"
+                  return 13
+
+              fi
+
+
+              if ! export_partdevice diskdev 0 >/dev/null 2>&1; then
+
+                  TARGET_GUARD_MESSAGE="export_partdevice_failed"
+                  return 14
+
+              fi
+
+
+              SYSUPGRADE_DISK="/dev/${diskdev}"
+
+
+              if [ "$diskdev" != "$EXPECTED_DISKDEV" ]; then
+
+                  TARGET_GUARD_MESSAGE="target_mismatch"
+                  return 15
+
+              fi
+
+
+              TARGET_GUARD_MESSAGE="ok"
+
+              return 0
           }
 
 
@@ -738,20 +855,49 @@ jobs:
               get_board
 
               if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
-                  printf '{"ok":false,"message":"board_mismatch"}\n'
+
+                  printf \
+                    '{"ok":false,"message":"board_mismatch"}\n'
+
                   exit 1
               fi
+
+
+              case "$UPGRADE_DISK" in
+
+                  /dev/mmcblk0|/dev/mmcblk1)
+                      ;;
+
+                  *)
+
+                      printf \
+                        '{"ok":false,"message":"unsupported_root_device"}\n'
+
+                      exit 1
+                      ;;
+
+              esac
+
 
               if ! fetch_metadata; then
-                  printf '{"ok":false,"message":"metadata_download_failed"}\n'
+
+                  printf \
+                    '{"ok":false,"message":"metadata_download_failed"}\n'
+
                   exit 1
               fi
 
+
               if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+
                   AVAILABLE="false"
+
               else
+
                   AVAILABLE="true"
+
               fi
+
 
               printf '{'
               printf '"ok":true,'
@@ -771,27 +917,53 @@ jobs:
               get_root_info
               get_board
 
+
+              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
+
+                  printf \
+                    '{"ok":false,"message":"board_mismatch"}\n'
+
+                  exit 1
+              fi
+
+
               case "$ROOT_DEVICE" in
 
                   /dev/mmcblk0p2|/dev/mmcblk1p2)
                       ;;
 
                   *)
-                      printf '{"ok":false,"message":"unsupported_root_device"}\n'
+
+                      printf \
+                        '{"ok":false,"message":"unsupported_root_device"}\n'
+
                       exit 1
                       ;;
 
               esac
 
 
-              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
-                  printf '{"ok":false,"message":"board_mismatch"}\n'
+              # Verify target BEFORE downloading.
+              if ! verify_sysupgrade_target; then
+
+                  printf '{'
+                  printf '"ok":false,'
+                  printf '"message":"target_guard_failed",'
+                  printf '"guard_message":"%s",' "$TARGET_GUARD_MESSAGE"
+                  printf '"boot_media":"%s",' "$BOOT_MEDIA"
+                  printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+                  printf '"sysupgrade_disk":"%s"' "$SYSUPGRADE_DISK"
+                  printf '}\n'
+
                   exit 1
               fi
 
 
               if ! fetch_metadata; then
-                  printf '{"ok":false,"message":"metadata_download_failed"}\n'
+
+                  printf \
+                    '{"ok":false,"message":"metadata_download_failed"}\n'
+
                   exit 1
               fi
 
@@ -809,7 +981,8 @@ jobs:
 
                   rm -f "${FIRMWARE}.part"
 
-                  printf '{"ok":false,"message":"firmware_download_failed"}\n'
+                  printf \
+                    '{"ok":false,"message":"firmware_download_failed"}\n'
 
                   exit 1
               fi
@@ -819,8 +992,8 @@ jobs:
 
 
               ACTUAL_SHA="$(
-                  sha256sum "$FIRMWARE" | \
-                    awk '{print $1}'
+                  sha256sum "$FIRMWARE" |
+                  awk '{print $1}'
               )"
 
 
@@ -828,7 +1001,8 @@ jobs:
 
                   rm -f "$FIRMWARE"
 
-                  printf '{"ok":false,"message":"sha256_failed"}\n'
+                  printf \
+                    '{"ok":false,"message":"sha256_failed"}\n'
 
                   exit 1
               fi
@@ -843,15 +1017,32 @@ jobs:
                   >"$TESTLOG" 2>&1
               then
 
-                  printf '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+                  printf \
+                    '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+
+                  exit 1
+              fi
+
+
+              # Verify target again after sysupgrade -T.
+              if ! verify_sysupgrade_target; then
+
+                  printf '{'
+                  printf '"ok":false,'
+                  printf '"message":"target_guard_failed_after_test",'
+                  printf '"guard_message":"%s",' "$TARGET_GUARD_MESSAGE"
+                  printf '"boot_media":"%s",' "$BOOT_MEDIA"
+                  printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+                  printf '"sysupgrade_disk":"%s"' "$SYSUPGRADE_DISK"
+                  printf '}\n'
 
                   exit 1
               fi
 
 
               SIZE="$(
-                  du -h "$FIRMWARE" | \
-                    awk '{print $1}'
+                  du -h "$FIRMWARE" |
+                  awk '{print $1}'
               )"
 
 
@@ -863,7 +1054,9 @@ jobs:
               printf '"sha256":"%s",' "$ACTUAL_SHA"
               printf '"size":"%s",' "$SIZE"
               printf '"boot_media":"%s",' "$BOOT_MEDIA"
-              printf '"upgrade_disk":"%s"' "$UPGRADE_DISK"
+              printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+              printf '"sysupgrade_disk":"%s",' "$SYSUPGRADE_DISK"
+              printf '"target_guard":"ok"'
               printf '}\n'
           }
 
@@ -873,31 +1066,37 @@ jobs:
               get_root_info
               get_board
 
+
+              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
+
+                  printf \
+                    '{"ok":false,"message":"board_mismatch"}\n'
+
+                  exit 1
+              fi
+
+
               case "$ROOT_DEVICE" in
 
                   /dev/mmcblk0p2|/dev/mmcblk1p2)
                       ;;
 
                   *)
-                      printf '{"ok":false,"message":"unsupported_root_device"}\n'
+
+                      printf \
+                        '{"ok":false,"message":"unsupported_root_device"}\n'
+
                       exit 1
                       ;;
 
               esac
 
 
-              if [ "$BOARD" != "$EXPECTED_BOARD" ]; then
-
-                  printf '{"ok":false,"message":"board_mismatch"}\n'
-
-                  exit 1
-              fi
-
-
               if [ ! -f "$META" ] || \
                  [ ! -f "$FIRMWARE" ]; then
 
-                  printf '{"ok":false,"message":"firmware_not_prepared"}\n'
+                  printf \
+                    '{"ok":false,"message":"firmware_not_prepared"}\n'
 
                   exit 1
               fi
@@ -912,15 +1111,16 @@ jobs:
 
 
               ACTUAL_SHA="$(
-                  sha256sum "$FIRMWARE" | \
-                    awk '{print $1}'
+                  sha256sum "$FIRMWARE" |
+                  awk '{print $1}'
               )"
 
 
               if [ -z "$LATEST_SHA" ] || \
                  [ "$LATEST_SHA" != "$ACTUAL_SHA" ]; then
 
-                  printf '{"ok":false,"message":"sha256_failed"}\n'
+                  printf \
+                    '{"ok":false,"message":"sha256_failed"}\n'
 
                   exit 1
               fi
@@ -932,7 +1132,25 @@ jobs:
                   >"$TESTLOG" 2>&1
               then
 
-                  printf '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+                  printf \
+                    '{"ok":false,"message":"sysupgrade_test_failed"}\n'
+
+                  exit 1
+              fi
+
+
+              # FINAL TARGET GUARD.
+              # This is executed immediately before real sysupgrade.
+              if ! verify_sysupgrade_target; then
+
+                  printf '{'
+                  printf '"ok":false,'
+                  printf '"message":"final_target_guard_failed",'
+                  printf '"guard_message":"%s",' "$TARGET_GUARD_MESSAGE"
+                  printf '"boot_media":"%s",' "$BOOT_MEDIA"
+                  printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+                  printf '"sysupgrade_disk":"%s"' "$SYSUPGRADE_DISK"
+                  printf '}\n'
 
                   exit 1
               fi
@@ -957,7 +1175,9 @@ jobs:
               printf '"ok":true,'
               printf '"started":true,'
               printf '"boot_media":"%s",' "$BOOT_MEDIA"
-              printf '"upgrade_disk":"%s"' "$UPGRADE_DISK"
+              printf '"upgrade_disk":"%s",' "$UPGRADE_DISK"
+              printf '"sysupgrade_disk":"%s",' "$SYSUPGRADE_DISK"
+              printf '"target_guard":"ok"'
               printf '}\n'
           }
 
@@ -993,6 +1213,8 @@ jobs:
           EOF
 
           chmod 755 files/usr/bin/doornet2-updater
+
+          sh -n files/usr/bin/doornet2-updater
 
 
           # ----------------------------------------------------------
@@ -1137,7 +1359,7 @@ jobs:
 
 
           # ----------------------------------------------------------
-          # LuCI view
+          # LuCI page
           # ----------------------------------------------------------
 
           cat > files/usr/lib/lua/luci/view/doornet2/update.htm <<'EOF'
@@ -1203,12 +1425,19 @@ jobs:
                       下载固件 →
                       SHA256 校验 →
                       sysupgrade 兼容性检查 →
+                      升级目标保险校验 →
                       正式升级。
                   </p>
 
                   <p>
-                      TF 启动时升级 TF；
-                      eMMC 启动时升级 eMMC。
+                      TF 启动时只升级 TF；
+                      eMMC 启动时只升级 eMMC。
+                  </p>
+
+                  <p>
+                      如果 DoorNet2 判断的目标磁盘与
+                      OpenWrt sysupgrade 判断结果不一致，
+                      系统会拒绝执行正式升级。
                   </p>
 
                   <div style="margin-top:20px">
@@ -1510,7 +1739,7 @@ jobs:
               setBusy(true);
 
               setStatus(
-                  "正在下载固件并执行 SHA256 / sysupgrade 校验..."
+                  "正在下载固件并执行 SHA256、sysupgrade 和目标磁盘保险校验..."
               );
 
               request(
@@ -1528,6 +1757,16 @@ jobs:
                               + (
                                   data.message ||
                                   "未知错误"
+                              )
+                              + (
+                                  data.guard_message
+                                  ? "<br />保险锁：" + data.guard_message
+                                  : ""
+                              )
+                              + (
+                                  data.sysupgrade_disk
+                                  ? "<br />sysupgrade 判断：" + data.sysupgrade_disk
+                                  : ""
                               )
                           );
 
@@ -1556,11 +1795,16 @@ jobs:
                           + "<br />"
                           + "sysupgrade：通过"
                           + "<br />"
+                          + "目标磁盘保险锁：通过"
+                          + "<br />"
+                          + "DoorNet2 目标：" +
+                          data.upgrade_disk
+                          + "<br />"
+                          + "sysupgrade 目标：" +
+                          data.sysupgrade_disk
+                          + "<br />"
                           + "大小：" +
                           data.size
-                          + "<br />"
-                          + "目标：" +
-                          data.upgrade_disk
                       );
 
                       document.getElementById(
@@ -1583,6 +1827,8 @@ jobs:
                       "即将升级 " +
                       disk +
                       "。\n\n"
+                      + "正式升级前系统会再次核对目标磁盘。\n"
+                      + "如果目标不一致会自动拒绝升级。\n\n"
                       + "升级过程中绝对不要断电。\n\n"
                       + "确定继续？"
                   )
@@ -1594,9 +1840,7 @@ jobs:
               setBusy(true);
 
               setStatus(
-                  "<strong>正在启动升级。</strong>"
-                  + "<br />"
-                  + "设备即将断开并自动重启。"
+                  "<strong>正在执行最终保险校验并启动升级。</strong>"
               );
 
               request(
@@ -1615,6 +1859,16 @@ jobs:
                                   data.message ||
                                   "未知错误"
                               )
+                              + (
+                                  data.guard_message
+                                  ? "<br />保险锁：" + data.guard_message
+                                  : ""
+                              )
+                              + (
+                                  data.sysupgrade_disk
+                                  ? "<br />sysupgrade 判断：" + data.sysupgrade_disk
+                                  : ""
+                              )
                           );
 
                           return;
@@ -1623,13 +1877,15 @@ jobs:
                       setStatus(
                           "<strong>升级已经开始。</strong>"
                           + "<br />"
-                          + "目标：" +
+                          + "DoorNet2 目标：" +
                           data.upgrade_disk
                           + "<br />"
-                          + "启动介质：" +
-                          data.boot_media
+                          + "sysupgrade 目标：" +
+                          data.sysupgrade_disk
+                          + "<br />"
+                          + "目标磁盘保险锁：通过"
                           + "<br /><br />"
-                          + "请等待设备自动重启。"
+                          + "设备即将断开并自动重启。"
                       );
                   }
               );
@@ -1645,7 +1901,7 @@ jobs:
 
 
       # ============================================================
-      # 13. Target / packages
+      # 13. Packages
       # ============================================================
 
       - name: Configure DoorNet2 and packages
@@ -1709,17 +1965,32 @@ jobs:
             'CONFIG_TARGET.*embedfire_doornet2' \
             .config || true
 
+          echo
           echo "===== ROOTFS ====="
 
           grep \
             'CONFIG_TARGET_ROOTFS_PARTSIZE' \
             .config || true
 
+          echo
           echo "===== FSTAB ====="
 
           cat files/etc/config/fstab
 
-          echo "===== UPDATER ====="
+          echo
+          echo "===== UPDATER HEADER ====="
+
+          head -20 files/usr/bin/doornet2-updater
+
+          echo
+          echo "===== UPDATER SAFETY ====="
+
+          grep -nE \
+            'export PATH|get_root_info|verify_sysupgrade_target|target_guard' \
+            files/usr/bin/doornet2-updater
+
+          echo
+          echo "===== UPDATER FILES ====="
 
           ls -lah \
             files/usr/bin/doornet2-updater \
@@ -1757,7 +2028,7 @@ jobs:
 
 
       # ============================================================
-      # 17. Artifacts
+      # 17. Prepare artifacts
       # ============================================================
 
       - name: Prepare artifact
@@ -1845,8 +2116,9 @@ jobs:
             "repository": "${GITHUB_REPOSITORY}",
             "asset": "DoorNet2-ext4-sysupgrade.img.gz",
             "sha256": "${SHA256}",
-            "boot_policy": "r13-proven-tf-first-emmc-fallback",
-            "extroot": false
+            "boot_policy": "proven-tf-first-emmc-fallback",
+            "extroot": false,
+            "updater": "target-guard-v1"
           }
           EOF
 
@@ -1863,20 +2135,26 @@ jobs:
           - GitHub Actions run: ${GITHUB_RUN_NUMBER}
           - Build date: ${DOORNET2_BUILD_DATE}
 
-          Configuration:
+          Main configuration:
 
           - LAN: 192.168.100.1
           - WAN: eth0 DHCP
           - RootFS: 7GB ext4
-          - r13-proven TF priority boot
-          - TF kernel + TF rootfs
+          - TF priority boot
           - eMMC automatic fallback
           - extroot disabled
-          - safe /etc/config/fstab
           - iStore included
-          - self-hosted OPKG feed
+          - GitHub OPKG feed
           - LuCI online updater
-          - actual mounted root detection
+
+          Online updater safety:
+
+          - Fixed PATH for LuCI/rpcd
+          - Boot media read from /proc/cmdline
+          - TF root /dev/mmcblk1p2 -> target /dev/mmcblk1
+          - eMMC root /dev/mmcblk0p2 -> target /dev/mmcblk0
+          - OpenWrt sysupgrade diskdev is checked before upgrade
+          - Upgrade is refused if DoorNet2 target and sysupgrade target differ
 
           Firmware:
 
@@ -1889,7 +2167,6 @@ jobs:
 
 
           ls -lah
-
           cat version.json
 
 
@@ -2108,6 +2385,7 @@ jobs:
 
           fi
 
+
           gh release view \
             "${DOORNET2_TAG}" \
             --repo "${GITHUB_REPOSITORY}"
@@ -2133,30 +2411,70 @@ jobs:
           echo "SAFE FSTAB:"
           cat files/etc/config/fstab
 
-          echo
-          echo "BOOT SCRIPT:"
-          grep -E \
-            'Trying TF|fallback|Fallback|rootdev|mmcblk' \
-            target/linux/rockchip/image/doornet2.bootscript
+          if grep -Eq \
+            "option[[:space:]]+target[[:space:]]+['\"]?/['\"]?" \
+            files/etc/config/fstab
+          then
+              echo "ERROR: extroot target found"
+              exit 1
+          fi
 
           echo
-          echo "VERIFY BAD R14 COMMANDS ARE ABSENT:"
+          echo "BOOT SCRIPT:"
+
+          grep -E \
+            'Trying TF|Fallback|rootdev|mmcblk' \
+            target/linux/rockchip/image/doornet2.bootscript
+
 
           if grep -Eq \
             '^[[:space:]]*(mmc dev|mmc rescan|part uuid)' \
             target/linux/rockchip/image/doornet2.bootscript
           then
 
-              echo "ERROR: r14 boot commands found"
+              echo "ERROR: bad boot commands found"
               exit 1
 
           fi
 
-          echo "No mmc dev/mmc rescan/part uuid commands."
+
+          echo
+          echo "UPDATER PATH:"
+
+          grep \
+            'export PATH=/usr/sbin:/usr/bin:/sbin:/bin' \
+            files/usr/bin/doornet2-updater
+
+
+          echo
+          echo "UPDATER ROOT DETECTION:"
+
+          grep -n \
+            'root=/dev/mmcblk0p2|root=/dev/mmcblk1p2' \
+            files/usr/bin/doornet2-updater
+
+
+          echo
+          echo "UPDATER TARGET GUARD:"
+
+          grep -n \
+            'verify_sysupgrade_target' \
+            files/usr/bin/doornet2-updater
+
+
+          echo
+          echo "SHELL SYNTAX:"
+
+          sh -n files/usr/bin/doornet2-updater
+
+          echo "Updater syntax OK."
+
 
           echo
           echo "RELEASE FILES:"
+
           ls -lah ./artifact/release/
+
 
           echo
           echo "SUCCESS"
