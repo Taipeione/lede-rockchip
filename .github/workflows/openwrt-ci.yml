@@ -143,7 +143,7 @@ jobs:
 
 
       # ============================================================
-      # 4. iStore + iStoreOS-style QuickStart UI
+      # 4. iStore + DoorNet2 iStoreOS-style visual UI
       # ============================================================
 
       - name: Add iStore feed
@@ -157,6 +157,31 @@ jobs:
           cat feeds.conf.default
 
 
+      - name: Add PassWall feeds
+        run: |
+          set -e
+
+          echo "===== ADD OFFICIAL PASSWALL FEEDS ====="
+
+          # PassWall upstream recommends placing its feeds before the normal
+          # OpenWrt feeds so its newer core package definitions take priority.
+          sed -i \
+            -e '/^src-git passwall_packages /d' \
+            -e '/^src-git passwall_luci /d' \
+            feeds.conf.default
+
+          {
+            echo 'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main'
+            echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main'
+            cat feeds.conf.default
+          } > feeds.conf.default.new
+
+          mv feeds.conf.default.new feeds.conf.default
+
+          echo "===== PASSWALL FEEDS ====="
+          head -n 8 feeds.conf.default
+
+
       - name: Update base feeds
         run: |
           set -e
@@ -168,6 +193,71 @@ jobs:
             -d y \
             -p istore \
             luci-app-store
+
+          echo "===== VERIFY PASSWALL FEEDS ====="
+
+          test -f feeds/passwall_luci/luci-app-passwall/Makefile
+          test -d feeds/passwall_packages
+
+          ./scripts/feeds install \
+            -d y \
+            -p passwall_luci \
+            luci-app-passwall
+
+          grep -nE \
+            'PKG_NAME:=luci-app-passwall|PKG_VERSION|LUCI_DEPENDS' \
+            feeds/passwall_luci/luci-app-passwall/Makefile \
+            | head -20
+
+
+      - name: Add DNS acceleration UU and AdGuard packages
+        run: |
+          set -e
+
+          echo "===== ADD ISTORE NETWORK APP FEED ====="
+
+          # LinkEase's curated iStore package set contains SmartDNS and
+          # NetEase UU Game Booster packages that match the iStoreOS ecosystem.
+          sed -i \
+            -e '/^src-git istore_packages /d' \
+            feeds.conf.default
+
+          echo 'src-git istore_packages https://github.com/linkease/istore-packages.git;main' \
+            >> feeds.conf.default
+
+          ./scripts/feeds update istore_packages
+
+          # Force these package names to come from the curated iStore package
+          # feed instead of any older duplicate in the normal feeds.
+          ./scripts/feeds install \
+            -d y \
+            -f \
+            -p istore_packages \
+            smartdns \
+            luci-app-smartdns \
+            uugamebooster \
+            luci-app-uugamebooster
+
+          # AdGuard Home is maintained in the normal OpenWrt packages feed.
+          ./scripts/feeds install \
+            -d y \
+            -f \
+            -p packages \
+            adguardhome
+
+          echo "===== VERIFY NETWORK APP SOURCES ====="
+
+          ./scripts/feeds search -r '^smartdns$' | head -20 || true
+          ./scripts/feeds search -r '^luci-app-smartdns$' | head -20 || true
+          ./scripts/feeds search -r '^uugamebooster$' | head -20 || true
+          ./scripts/feeds search -r '^luci-app-uugamebooster$' | head -20 || true
+          ./scripts/feeds search -r '^adguardhome$' | head -20 || true
+
+          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/smartdns/Makefile' -print -quit)"
+          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/luci-app-smartdns/Makefile' -print -quit)"
+          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/uugamebooster/Makefile' -print -quit)"
+          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/luci-app-uugamebooster/Makefile' -print -quit)"
+          test -n "$(find feeds/packages -type f -name Makefile -path '*/adguardhome/Makefile' -print -quit)"
 
 
       - name: Add QuickStart feeds and Argon UI
@@ -240,7 +330,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R23 UI defaults
+          # DoorNet2 R24 UI defaults
           # Keep Bootstrap installed as a recovery theme, but use Argon by default.
 
           if uci -q get luci.main >/dev/null 2>&1; then
@@ -256,6 +346,407 @@ jobs:
 
           cat files/etc/uci-defaults/95-doornet2-ui
 
+
+      - name: Configure DNS and accelerator safe defaults
+        run: |
+          set -e
+
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/97-doornet2-network-apps <<'EOF'
+          #!/bin/sh
+
+          # DoorNet2 network apps are installed but intentionally not enabled
+          # automatically. SmartDNS and AdGuard Home can both provide DNS,
+          # so enabling them blindly may cause a port-53 conflict.
+          # Configure the desired topology in LuCI first, then enable services.
+
+          for svc in smartdns adguardhome uugamebooster; do
+              if [ -x "/etc/init.d/$svc" ]; then
+                  "/etc/init.d/$svc" disable >/dev/null 2>&1 || true
+                  "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
+              fi
+          done
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/97-doornet2-network-apps
+
+          sh -n files/etc/uci-defaults/97-doornet2-network-apps
+
+
+      - name: Add DoorNet2 iStoreOS dark visual layer
+        run: |
+          set -e
+
+          echo "===== ADD DOORNET2 ISTOREOS DARK VISUAL ====="
+
+          mkdir -p files/www/luci-static/doornet2
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/www/luci-static/doornet2/istoreos-dark.css <<'EOF'
+          /*
+           * DoorNet2 iStoreOS-inspired dark visual layer
+           * Visual-only override. No boot/storage/network logic is changed.
+           */
+
+          :root {
+            --dn-bg: #1f1f1f;
+            --dn-sidebar: #303030;
+            --dn-sidebar-hover: #3a3a3a;
+            --dn-card: #2a2a2a;
+            --dn-card-2: #2f2f2f;
+            --dn-border: #3a3a3a;
+            --dn-text: #f3f4f6;
+            --dn-muted: #a7adb7;
+            --dn-accent: #6574e8;
+            --dn-accent-2: #7b61ff;
+            --dn-green: #62d394;
+            --dn-shadow: 0 1px 2px rgba(0,0,0,.22);
+          }
+
+          html,
+          body {
+            background: var(--dn-bg) !important;
+            color: var(--dn-text) !important;
+          }
+
+          body,
+          button,
+          input,
+          select,
+          textarea {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif !important;
+          }
+
+          /* ---------- Argon shell ---------- */
+          .main,
+          .main-right,
+          #maincontent,
+          #maincontent > .container {
+            background: var(--dn-bg) !important;
+          }
+
+          #maincontent > .container,
+          .main-right > #maincontent > .container {
+            max-width: none !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+          }
+
+          .main-left,
+          #mainmenu {
+            background: var(--dn-sidebar) !important;
+            box-shadow: none !important;
+            border-right: 1px solid #393939 !important;
+          }
+
+          .sidenav-header {
+            background: var(--dn-sidebar) !important;
+            border-bottom: 1px solid rgba(255,255,255,.04) !important;
+          }
+
+          .main-left .brand,
+          header .brand {
+            color: #fff !important;
+            font-weight: 700 !important;
+            letter-spacing: -.3px !important;
+            text-shadow: none !important;
+          }
+
+          .main-left .brand::before,
+          header .brand::before {
+            content: "◈";
+            display: inline-block;
+            margin-right: 7px;
+            color: #fff;
+            font-size: .92em;
+          }
+
+          .main-right > header,
+          header.bg-primary,
+          header .fill {
+            background: var(--dn-bg) !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            border-bottom: 1px solid #2a2a2a !important;
+          }
+
+          .main-right > header .container {
+            max-width: none !important;
+            width: 100% !important;
+          }
+
+          .main-left .nav > li > a,
+          .main-left .nav > li > ul > li > a,
+          .main-left .nav a,
+          #mainmenu a {
+            color: #c9cdd4 !important;
+            border-radius: 7px !important;
+            transition: background .15s ease, color .15s ease !important;
+          }
+
+          .main-left .nav > li > a:hover,
+          .main-left .nav > li > ul > li > a:hover,
+          #mainmenu a:hover {
+            color: #fff !important;
+            background: var(--dn-sidebar-hover) !important;
+          }
+
+          .main-left .nav li.active > a,
+          .main-left .nav li.slide.active > a,
+          #mainmenu li.active > a {
+            color: #fff !important;
+            background: var(--dn-accent) !important;
+            box-shadow: none !important;
+          }
+
+          .main-left .nav li.active > a::before,
+          .main-left .nav li.slide.active > a::before {
+            background: transparent !important;
+          }
+
+          .main-left .nav .menu-item-arrow,
+          .main-left .nav .icon {
+            color: inherit !important;
+          }
+
+          .darkMask {
+            display: none !important;
+          }
+
+          /* ---------- Generic LuCI cards/forms ---------- */
+          .cbi-map,
+          .cbi-section,
+          .cbi-section-node,
+          .panel,
+          .card,
+          .modal,
+          .alert-message,
+          .table,
+          .table-titles,
+          .table-row {
+            border-color: var(--dn-border) !important;
+          }
+
+          .cbi-section,
+          .cbi-section-node,
+          .panel,
+          .card,
+          .modal {
+            background: var(--dn-card) !important;
+            color: var(--dn-text) !important;
+            box-shadow: var(--dn-shadow) !important;
+          }
+
+          h1, h2, h3, h4, h5, h6,
+          .cbi-section-title,
+          .cbi-map-descr,
+          label,
+          legend,
+          .control-label {
+            color: var(--dn-text) !important;
+          }
+
+          small,
+          .help-block,
+          .cbi-value-description,
+          .text-muted {
+            color: var(--dn-muted) !important;
+          }
+
+          input,
+          select,
+          textarea,
+          .cbi-input-text,
+          .cbi-input-select {
+            background: #242424 !important;
+            color: var(--dn-text) !important;
+            border-color: #454545 !important;
+          }
+
+          /* ---------- QuickStart dashboard ---------- */
+          body[data-page*="quickstart"] #maincontent,
+          body[data-page*="quickstart"] #maincontent > .container,
+          body[data-page*="quickstart"] .main-right {
+            background: var(--dn-bg) !important;
+          }
+
+          body[data-page*="quickstart"] #maincontent > .container {
+            padding: 12px 14px 22px !important;
+          }
+
+          body[data-page*="quickstart"] [class*="card"],
+          body[data-page*="quickstart"] [class*="panel"],
+          body[data-page*="quickstart"] [class*="module"],
+          body[data-page*="quickstart"] [class*="widget"],
+          body[data-page*="quickstart"] [class*="block"],
+          body[data-page*="quickstart"] section {
+            border-color: var(--dn-border) !important;
+            box-shadow: var(--dn-shadow) !important;
+          }
+
+          body[data-page*="quickstart"] [style*="background: rgb(255"],
+          body[data-page*="quickstart"] [style*="background-color: rgb(255"],
+          body[data-page*="quickstart"] [style*="background:#fff"],
+          body[data-page*="quickstart"] [style*="background: #fff"] {
+            background: var(--dn-card) !important;
+          }
+
+          body[data-page*="quickstart"] .ant-card,
+          body[data-page*="quickstart"] .ant-card-bordered,
+          body[data-page*="quickstart"] .ant-table,
+          body[data-page*="quickstart"] .ant-modal-content,
+          body[data-page*="quickstart"] .ant-drawer-content,
+          body[data-page*="quickstart"] .el-card,
+          body[data-page*="quickstart"] .q-card {
+            background: var(--dn-card) !important;
+            border-color: var(--dn-border) !important;
+            color: var(--dn-text) !important;
+          }
+
+          body[data-page*="quickstart"] .ant-card-head,
+          body[data-page*="quickstart"] .ant-card-body,
+          body[data-page*="quickstart"] .ant-table-thead > tr > th,
+          body[data-page*="quickstart"] .ant-table-tbody > tr > td {
+            background: transparent !important;
+            border-color: var(--dn-border) !important;
+            color: var(--dn-text) !important;
+          }
+
+          body[data-page*="quickstart"] .ant-typography,
+          body[data-page*="quickstart"] .ant-card,
+          body[data-page*="quickstart"] .ant-card *:not(svg):not(path),
+          body[data-page*="quickstart"] .el-card,
+          body[data-page*="quickstart"] .el-card *:not(svg):not(path) {
+            color: inherit;
+          }
+
+          body[data-page*="quickstart"] canvas {
+            border-radius: 8px !important;
+          }
+
+          body[data-page*="quickstart"] a {
+            color: #7ba7ff;
+          }
+
+          body[data-page*="quickstart"] button,
+          body[data-page*="quickstart"] .btn,
+          body[data-page*="quickstart"] .ant-btn {
+            border-radius: 7px !important;
+          }
+
+          /* Match the compact iStoreOS desktop composition. */
+          @media (min-width: 1200px) {
+            .main-left,
+            #mainmenu {
+              width: 164px !important;
+            }
+
+            .main-right {
+              margin-left: 164px !important;
+              width: calc(100% - 164px) !important;
+            }
+          }
+          EOF
+
+          # Load the DoorNet2 visual override after Argon's own stylesheet and
+          # brand the UI as DoorNet2. We intentionally do not label this firmware
+          # as official iStoreOS; only the visual language is iStoreOS-inspired.
+          python3 - <<'PY2'
+          from pathlib import Path
+
+          roots = [
+              Path('package/lean/luci-theme-argon/ucode/template/themes/argon'),
+              Path('package/lean/luci-theme-argon/luasrc/view/themes/argon'),
+          ]
+
+          patched_link = 0
+          patched_brand = 0
+
+          for root in roots:
+              if not root.exists():
+                  continue
+              for p in root.glob('header.*'):
+                  text = p.read_text(errors='ignore')
+                  old = text
+
+                  # Modern ucode template.
+                  needle = '<link rel="stylesheet" href="{{ media }}/css/cascade.css{# ?v=PKG_VERSION #}">'
+                  custom = '<link rel="stylesheet" href="/luci-static/doornet2/istoreos-dark.css">'
+                  if needle in text and custom not in text:
+                      text = text.replace(needle, needle + '\n\t' + custom, 1)
+                      patched_link += 1
+
+                  # Older Lua/HTM variants: insert after the Argon cascade stylesheet.
+                  if custom not in text:
+                      lines = text.splitlines()
+                      out = []
+                      inserted = False
+                      for line in lines:
+                          out.append(line)
+                          if (not inserted and 'stylesheet' in line and
+                                  ('cascade.css' in line or 'cascades.css' in line)):
+                              out.append('\t' + custom)
+                              inserted = True
+                      if inserted:
+                          text = '\n'.join(out) + ('\n' if old.endswith('\n') else '')
+                          patched_link += 1
+
+                  before_brand = text
+                  text = text.replace('>{{ hostname }}</a>', '>DoorNet2</a>')
+                  text = text.replace('><%= hostname %></a>', '>DoorNet2</a>')
+                  text = text.replace('><%=hostname%></a>', '>DoorNet2</a>')
+                  if text != before_brand:
+                      patched_brand += 1
+
+                  if text != old:
+                      p.write_text(text)
+                      print('patched theme header:', p)
+
+          if patched_link < 1:
+              raise SystemExit('ERROR: could not inject DoorNet2 visual stylesheet into Argon header')
+
+          print('visual links patched:', patched_link)
+          print('brand templates patched:', patched_brand)
+          PY2
+
+          # Force dark mode and iStoreOS-like accent on every R24 first boot.
+          cat > files/etc/uci-defaults/96-doornet2-istoreos-visual <<'EOF'
+          #!/bin/sh
+
+          if uci -q get argon.@global[0] >/dev/null 2>&1; then
+              uci -q set argon.@global[0].mode='dark'
+              uci -q set argon.@global[0].primary='#6574e8'
+              uci -q set argon.@global[0].dark_primary='#6574e8'
+              uci -q set argon.@global[0].blur='0'
+              uci -q set argon.@global[0].blur_dark='0'
+              uci -q set argon.@global[0].transparency='0'
+              uci -q set argon.@global[0].transparency_dark='0'
+              uci -q commit argon
+          fi
+
+          if uci -q get luci.main >/dev/null 2>&1; then
+              uci -q set luci.main.mediaurlbase='/luci-static/argon'
+              uci -q set luci.main.lang='zh_cn'
+              uci -q commit luci
+          fi
+
+          rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/96-doornet2-istoreos-visual
+
+          echo "===== R24 VISUAL FILES ====="
+          test -s files/www/luci-static/doornet2/istoreos-dark.css
+          test -x files/etc/uci-defaults/96-doornet2-istoreos-visual
+          grep -nE 'DoorNet2|dn-bg|dn-card|quickstart' \
+            files/www/luci-static/doornet2/istoreos-dark.css \
+            | head -30
+          grep -nE 'mode=.dark.|dark_primary|mediaurlbase' \
+            files/etc/uci-defaults/96-doornet2-istoreos-visual
 
       # ============================================================
       # 5. LAN / WAN
@@ -538,6 +1029,9 @@ jobs:
           src/gz openwrt_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/packages
           src/gz openwrt_routing https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/routing
           src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
+          src/gz doornet2_passwall_luci https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/passwall_luci
+          src/gz doornet2_passwall_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/passwall_packages
+          src/gz doornet2_istore_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/istore_packages
           EOF
 
 
@@ -563,7 +1057,9 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
-          DOORNET2_UI='quickstart-argon-v1'
+          DOORNET2_UI='quickstart-istoreos-dark-v2'
+          DOORNET2_PASSWALL='builtin-online-feed-v1'
+          DOORNET2_NETWORK_APPS='smartdns-uu-adguard-online-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -2713,6 +3209,678 @@ jobs:
 
 
       # ============================================================
+      # 12A. PassWall safe online updater
+      #
+      # PassWall itself and its userspace cores are published into the same
+      # DoorNet2 GitHub OPKG feed as the firmware build. This means they can
+      # be updated without flashing the whole firmware, while avoiding
+      # third-party kernel-module ABI mismatches.
+      # ============================================================
+
+      - name: Add PassWall online updater
+        run: |
+          set -e
+
+          mkdir -p \
+            files/usr/bin \
+            files/usr/lib/lua/luci/controller \
+            files/usr/lib/lua/luci/view/doornet2
+
+          cat > files/usr/bin/doornet2-passwall-updater <<'EOF'
+          #!/bin/sh
+
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+          FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|geoview|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|shadowsocks-rust-|shadowsocksr-libev-|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
+
+          json_escape()
+          {
+              printf '%s' "$1" \
+                | sed \
+                    -e 's/\\/\\\\/g' \
+                    -e 's/"/\\"/g' \
+                    -e ':a;N;$!ba;s/\n/\\n/g'
+          }
+
+          installed_version()
+          {
+              opkg status luci-app-passwall 2>/dev/null \
+                | awk -F': ' '$1 == "Version" { print $2; exit }'
+          }
+
+          available_version()
+          {
+              opkg list luci-app-passwall 2>/dev/null \
+                | awk '$1 == "luci-app-passwall" { print $3; exit }'
+          }
+
+          upgradable_packages()
+          {
+              opkg list-upgradable 2>/dev/null \
+                | awk '{ print $1 }' \
+                | grep -E "$FILTER" \
+                || true
+          }
+
+          status_json()
+          {
+              local installed available packages count
+
+              installed="$(installed_version)"
+              available="$(available_version)"
+              packages="$(upgradable_packages)"
+              count="$(printf '%s\n' "$packages" | sed '/^$/d' | wc -l)"
+
+              printf '{'
+              printf '"installed":"%s",' "$(json_escape "${installed:-not-installed}")"
+              printf '"available":"%s",' "$(json_escape "${available:-unknown}")"
+              printf '"count":%s,' "${count:-0}"
+              printf '"packages":"%s"' "$(json_escape "$packages")"
+              printf '}\n'
+          }
+
+          do_check()
+          {
+              opkg update >/tmp/passwall-opkg-update.log 2>&1 || {
+                  printf '{"ok":false,"message":"OPKG 更新失败，请查看 /tmp/passwall-opkg-update.log"}\n'
+                  return 1
+              }
+
+              printf '{"ok":true,"status":'
+              status_json | tr -d '\n'
+              printf '}\n'
+          }
+
+          do_upgrade()
+          {
+              local packages
+
+              opkg update >/tmp/passwall-opkg-update.log 2>&1 || {
+                  printf '{"ok":false,"message":"OPKG 更新失败"}\n'
+                  return 1
+              }
+
+              packages="$(upgradable_packages)"
+
+              if [ -z "$packages" ]; then
+                  printf '{"ok":true,"message":"PassWall 已经是最新版本，没有需要更新的组件。"}\n'
+                  return 0
+              fi
+
+              echo "$packages" > /tmp/passwall-upgrade-packages.txt
+
+              # shellcheck disable=SC2086
+              if opkg upgrade $packages >/tmp/passwall-upgrade.log 2>&1; then
+                  rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
+                  /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+                  printf '{"ok":true,"message":"PassWall 在线更新完成。建议刷新浏览器；如核心正在运行，可重启 PassWall 服务。"}\n'
+              else
+                  printf '{"ok":false,"message":"PassWall 更新失败，请查看 /tmp/passwall-upgrade.log"}\n'
+                  return 1
+              fi
+          }
+
+          case "$1" in
+              status)
+                  status_json
+                  ;;
+              check)
+                  do_check
+                  ;;
+              upgrade)
+                  do_upgrade
+                  ;;
+              *)
+                  echo "Usage: doornet2-passwall-updater {status|check|upgrade}" >&2
+                  exit 1
+                  ;;
+          esac
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-passwall-updater
+          sh -n files/usr/bin/doornet2-passwall-updater
+
+          cat > files/usr/lib/lua/luci/controller/doornet2_passwall_update.lua <<'EOF'
+          module("luci.controller.doornet2_passwall_update", package.seeall)
+
+          function index()
+              if not nixio.fs.access("/usr/bin/doornet2-passwall-updater") then
+                  return
+              end
+
+              local page = entry(
+                  {"admin", "services", "doornet2_passwall_update"},
+                  template("doornet2/passwall_update"),
+                  _("PassWall 在线升级"),
+                  99
+              )
+              page.dependent = false
+
+              entry(
+                  {"admin", "services", "doornet2_passwall_update", "status"},
+                  call("action_status")
+              ).leaf = true
+
+              entry(
+                  {"admin", "services", "doornet2_passwall_update", "check"},
+                  call("action_check")
+              ).leaf = true
+
+              entry(
+                  {"admin", "services", "doornet2_passwall_update", "upgrade"},
+                  call("action_upgrade")
+              ).leaf = true
+          end
+
+          local function output(command)
+              local http = require "luci.http"
+              local sys = require "luci.sys"
+              http.prepare_content("application/json")
+              http.write(sys.exec("/usr/bin/doornet2-passwall-updater " .. command .. " 2>/dev/null"))
+          end
+
+          function action_status()
+              output("status")
+          end
+
+          function action_check()
+              output("check")
+          end
+
+          function action_upgrade()
+              output("upgrade")
+          end
+          EOF
+
+          cat > files/usr/lib/lua/luci/view/doornet2/passwall_update.htm <<'EOF'
+          <%+header%>
+
+          <h2><%:PassWall 在线升级%></h2>
+
+          <div class="cbi-map-descr">
+            <%:只更新 PassWall、中文包以及 PassWall 使用的用户态核心组件。不会更新内核、kmod，也不会刷写 DoorNet2 固件。更新包来自 DoorNet2 自己的 GitHub OPKG feed，与当前固件使用同一套源码和编译环境。%>
+          </div>
+
+          <div class="cbi-section">
+            <div class="cbi-section-node">
+              <p><strong><%:已安装版本%>：</strong><span id="pw-installed">读取中...</span></p>
+              <p><strong><%:Feed 版本%>：</strong><span id="pw-available">读取中...</span></p>
+              <p><strong><%:可更新组件%>：</strong><span id="pw-count">-</span></p>
+              <pre id="pw-packages" style="white-space:pre-wrap;min-height:40px"></pre>
+
+              <p>
+                <button class="cbi-button cbi-button-action" type="button" onclick="pwCheck()"><%:检查更新%></button>
+                <button class="cbi-button cbi-button-apply" type="button" onclick="pwUpgrade()"><%:立即更新%></button>
+              </p>
+
+              <div id="pw-message"></div>
+            </div>
+          </div>
+
+          <script type="text/javascript">
+          function setMsg(s) {
+              document.getElementById('pw-message').innerHTML = s || '';
+          }
+
+          function renderStatus(s) {
+              if (!s) return;
+              document.getElementById('pw-installed').textContent = s.installed || 'unknown';
+              document.getElementById('pw-available').textContent = s.available || 'unknown';
+              document.getElementById('pw-count').textContent = s.count || 0;
+              document.getElementById('pw-packages').textContent = s.packages || '没有可更新组件';
+          }
+
+          function req(path, cb) {
+              XHR.get('<%=luci.dispatcher.build_url("admin/services/doornet2_passwall_update")%>/' + path, null, function(x, data) {
+                  cb(data || {});
+              });
+          }
+
+          function pwStatus() {
+              req('status', function(data) { renderStatus(data); });
+          }
+
+          function pwCheck() {
+              setMsg('正在更新软件列表并检查 PassWall...');
+              req('check', function(data) {
+                  if (data.ok && data.status) {
+                      renderStatus(data.status);
+                      setMsg('<strong>检查完成。</strong>');
+                  } else {
+                      setMsg('<strong>检查失败：</strong>' + (data.message || 'unknown'));
+                  }
+              });
+          }
+
+          function pwUpgrade() {
+              if (!confirm('确认在线更新 PassWall 及其用户态核心组件？')) return;
+              setMsg('正在更新，请不要关闭页面或断电...');
+              req('upgrade', function(data) {
+                  setMsg('<strong>' + (data.message || (data.ok ? '完成' : '失败')) + '</strong>');
+                  setTimeout(pwStatus, 2500);
+              });
+          }
+
+          window.onload = pwStatus;
+          </script>
+
+          <%+footer%>
+          EOF
+
+          echo "===== PASSWALL ONLINE UPDATER ====="
+          sh -n files/usr/bin/doornet2-passwall-updater
+          grep -nE \
+            'PassWall 在线升级|doornet2-passwall-updater' \
+            files/usr/lib/lua/luci/controller/doornet2_passwall_update.lua
+
+
+      # ============================================================
+      # 12B. DoorNet2 network application online updater
+      #
+      # Online-updatable userspace components:
+      #   - PassWall proxy routing
+      #   - SmartDNS DNS acceleration
+      #   - NetEase UU Game Booster
+      #   - AdGuard Home DNS/ad blocking
+      #
+      # No kmod/kernel package is ever selected by this updater.
+      # Packages come from DoorNet2's own GitHub OPKG feed built by the
+      # same workflow as the firmware.
+      # ============================================================
+
+      - name: Add network apps online updater
+        run: |
+          set -e
+
+          mkdir -p \
+            files/usr/bin \
+            files/usr/lib/lua/luci/controller \
+            files/usr/lib/lua/luci/view/doornet2
+
+          cat > files/usr/bin/doornet2-app-updater <<'EOF'
+          #!/bin/sh
+
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+          json_escape()
+          {
+              printf '%s' "$1" \
+                | sed \
+                    -e 's/\\/\\\\/g' \
+                    -e 's/"/\\"/g' \
+                    -e ':a;N;$!ba;s/\n/\\n/g'
+          }
+
+          component_meta()
+          {
+              case "$1" in
+                  passwall)
+                      LABEL='PassWall 代理分流'
+                      MAIN='luci-app-passwall'
+                      SERVICE='passwall'
+                      FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|geoview|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|shadowsocks-rust-|shadowsocksr-libev-|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
+                      ;;
+                  smartdns)
+                      LABEL='SmartDNS DNS 加速'
+                      MAIN='smartdns'
+                      SERVICE='smartdns'
+                      FILTER='^(smartdns|smartdns-ui|luci-app-smartdns|luci-i18n-smartdns-.*)$'
+                      ;;
+                  uu)
+                      LABEL='网易 UU 游戏加速器'
+                      MAIN='luci-app-uugamebooster'
+                      SERVICE='uugamebooster'
+                      FILTER='^(uugamebooster|luci-app-uugamebooster|luci-i18n-uugamebooster-.*)$'
+                      ;;
+                  adguard)
+                      LABEL='AdGuard Home'
+                      MAIN='adguardhome'
+                      SERVICE='adguardhome'
+                      FILTER='^(adguardhome|luci-app-adguardhome|luci-i18n-adguardhome-.*)$'
+                      ;;
+                  *)
+                      return 1
+                      ;;
+              esac
+
+              return 0
+          }
+
+          installed_version()
+          {
+              opkg status "$MAIN" 2>/dev/null \
+                | awk -F': ' '$1 == "Version" { print $2; exit }'
+          }
+
+          available_version()
+          {
+              opkg list "$MAIN" 2>/dev/null \
+                | awk -v p="$MAIN" '$1 == p { print $3; exit }'
+          }
+
+          upgradable_packages()
+          {
+              opkg list-upgradable 2>/dev/null \
+                | awk '{ print $1 }' \
+                | grep -E "$FILTER" \
+                || true
+          }
+
+          status_json()
+          {
+              local component installed available packages count
+
+              component="$1"
+
+              component_meta "$component" || {
+                  printf '{"ok":false,"message":"unknown component"}\n'
+                  return 1
+              }
+
+              installed="$(installed_version)"
+              available="$(available_version)"
+              packages="$(upgradable_packages)"
+              count="$(printf '%s\n' "$packages" | sed '/^$/d' | wc -l)"
+
+              printf '{'
+              printf '"ok":true,'
+              printf '"component":"%s",' "$(json_escape "$component")"
+              printf '"label":"%s",' "$(json_escape "$LABEL")"
+              printf '"installed":"%s",' "$(json_escape "${installed:-not-installed}")"
+              printf '"available":"%s",' "$(json_escape "${available:-unknown}")"
+              printf '"count":%s,' "${count:-0}"
+              printf '"packages":"%s"' "$(json_escape "$packages")"
+              printf '}\n'
+          }
+
+          do_refresh()
+          {
+              if opkg update >/tmp/doornet2-app-opkg-update.log 2>&1; then
+                  printf '{"ok":true,"message":"软件列表更新完成"}\n'
+              else
+                  printf '{"ok":false,"message":"OPKG 更新失败，请查看 /tmp/doornet2-app-opkg-update.log"}\n'
+                  return 1
+              fi
+          }
+
+          do_upgrade()
+          {
+              local component packages was_enabled
+
+              component="$1"
+
+              component_meta "$component" || {
+                  printf '{"ok":false,"message":"unknown component"}\n'
+                  return 1
+              }
+
+              opkg update >/tmp/doornet2-app-opkg-update.log 2>&1 || {
+                  printf '{"ok":false,"message":"OPKG 更新失败"}\n'
+                  return 1
+              }
+
+              packages="$(upgradable_packages)"
+
+              if [ -z "$packages" ]; then
+                  printf '{"ok":true,"message":"%s 已经是最新版本，没有需要更新的组件。"}\n' \
+                    "$(json_escape "$LABEL")"
+                  return 0
+              fi
+
+              # The filters above intentionally exclude all kmod/kernel packages.
+              echo "$packages" > "/tmp/doornet2-${component}-upgrade-packages.txt"
+
+              was_enabled=0
+              if [ -n "$SERVICE" ] && [ -x "/etc/init.d/$SERVICE" ]; then
+                  "/etc/init.d/$SERVICE" enabled >/dev/null 2>&1 && was_enabled=1 || true
+              fi
+
+              # shellcheck disable=SC2086
+              if opkg upgrade $packages >"/tmp/doornet2-${component}-upgrade.log" 2>&1; then
+                  rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
+
+                  if [ "$was_enabled" = "1" ] && [ -x "/etc/init.d/$SERVICE" ]; then
+                      "/etc/init.d/$SERVICE" restart >/dev/null 2>&1 || true
+                  fi
+
+                  /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+
+                  printf '{"ok":true,"message":"%s 在线更新完成。"}\n' \
+                    "$(json_escape "$LABEL")"
+              else
+                  printf '{"ok":false,"message":"%s 更新失败，请查看 %s"}\n' \
+                    "$(json_escape "$LABEL")" \
+                    "$(json_escape "/tmp/doornet2-${component}-upgrade.log")"
+                  return 1
+              fi
+          }
+
+          case "$1" in
+              refresh)
+                  do_refresh
+                  ;;
+              status)
+                  status_json "$2"
+                  ;;
+              upgrade)
+                  do_upgrade "$2"
+                  ;;
+              *)
+                  echo "Usage: doornet2-app-updater {refresh|status COMPONENT|upgrade COMPONENT}" >&2
+                  exit 1
+                  ;;
+          esac
+          EOF
+
+          chmod 755 files/usr/bin/doornet2-app-updater
+          sh -n files/usr/bin/doornet2-app-updater
+
+          cat > files/usr/lib/lua/luci/controller/doornet2_app_update.lua <<'EOF'
+          module("luci.controller.doornet2_app_update", package.seeall)
+
+          local allowed = {
+              passwall = true,
+              smartdns = true,
+              uu = true,
+              adguard = true
+          }
+
+          function index()
+              if not nixio.fs.access("/usr/bin/doornet2-app-updater") then
+                  return
+              end
+
+              local page = entry(
+                  {"admin", "services", "doornet2_app_update"},
+                  template("doornet2/app_update"),
+                  _("DoorNet2 组件在线升级"),
+                  98
+              )
+              page.dependent = false
+
+              entry(
+                  {"admin", "services", "doornet2_app_update", "refresh"},
+                  call("action_refresh")
+              ).leaf = true
+
+              entry(
+                  {"admin", "services", "doornet2_app_update", "status"},
+                  call("action_status")
+              ).leaf = true
+
+              entry(
+                  {"admin", "services", "doornet2_app_update", "upgrade"},
+                  call("action_upgrade")
+              ).leaf = true
+          end
+
+          local function output(command, component)
+              local http = require "luci.http"
+              local sys = require "luci.sys"
+
+              http.prepare_content("application/json")
+
+              if component and not allowed[component] then
+                  http.write('{"ok":false,"message":"invalid component"}')
+                  return
+              end
+
+              local cmd = "/usr/bin/doornet2-app-updater " .. command
+
+              if component then
+                  cmd = cmd .. " " .. component
+              end
+
+              http.write(sys.exec(cmd .. " 2>/dev/null"))
+          end
+
+          function action_refresh()
+              output("refresh", nil)
+          end
+
+          function action_status()
+              local http = require "luci.http"
+              output("status", http.formvalue("component"))
+          end
+
+          function action_upgrade()
+              local http = require "luci.http"
+              output("upgrade", http.formvalue("component"))
+          end
+          EOF
+
+          cat > files/usr/lib/lua/luci/view/doornet2/app_update.htm <<'EOF'
+          <%+header%>
+
+          <h2><%:DoorNet2 组件在线升级%></h2>
+
+          <div class="cbi-map-descr">
+            <%:这里仅更新用户态应用包，不更新内核/kmod，也不会刷写固件。软件包来自 DoorNet2 自己的 GitHub OPKG feed，与当前固件使用同一套编译环境。SmartDNS 与 AdGuard Home 都可能提供 DNS 服务，请先规划端口后再启用，避免同时占用 53 端口。%>
+          </div>
+
+          <p>
+            <button class="cbi-button cbi-button-action" type="button" onclick="refreshAll()"><%:更新软件列表并检查全部%></button>
+          </p>
+
+          <div id="dn-app-message"></div>
+
+          <div class="cbi-section">
+            <div class="cbi-section-node">
+              <table class="table">
+                <tr class="tr table-titles">
+                  <th class="th"><%:组件%></th>
+                  <th class="th"><%:当前版本%></th>
+                  <th class="th"><%:Feed版本%></th>
+                  <th class="th"><%:可更新包%></th>
+                  <th class="th"><%:操作%></th>
+                </tr>
+                <tbody id="dn-app-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <script type="text/javascript">
+          var components = [
+              ['passwall', 'PassWall 代理分流'],
+              ['smartdns', 'SmartDNS DNS 加速'],
+              ['uu', '网易 UU 游戏加速器'],
+              ['adguard', 'AdGuard Home']
+          ];
+
+          function esc(s) {
+              return String(s == null ? '' : s)
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;');
+          }
+
+          function rowHtml(c, label) {
+              return '<tr class="tr" id="row-' + c + '">' +
+                  '<td class="td"><strong>' + esc(label) + '</strong></td>' +
+                  '<td class="td" id="installed-' + c + '">读取中...</td>' +
+                  '<td class="td" id="available-' + c + '">读取中...</td>' +
+                  '<td class="td"><span id="count-' + c + '">-</span><pre id="packages-' + c + '" style="white-space:pre-wrap;margin:6px 0 0"></pre></td>' +
+                  '<td class="td"><button class="cbi-button cbi-button-apply" type="button" onclick="upgradeOne(\'' + c + '\',\'' + esc(label) + '\')">在线更新</button></td>' +
+                  '</tr>';
+          }
+
+          function initRows() {
+              var html = '';
+              for (var i = 0; i < components.length; i++) {
+                  html += rowHtml(components[i][0], components[i][1]);
+              }
+              document.getElementById('dn-app-body').innerHTML = html;
+          }
+
+          function setMsg(s) {
+              document.getElementById('dn-app-message').innerHTML = s || '';
+          }
+
+          function statusOne(c) {
+              XHR.get(
+                  '<%=luci.dispatcher.build_url("admin/services/doornet2_app_update/status")%>',
+                  { component: c },
+                  function(x, data) {
+                      data = data || {};
+                      document.getElementById('installed-' + c).textContent = data.installed || 'unknown';
+                      document.getElementById('available-' + c).textContent = data.available || 'unknown';
+                      document.getElementById('count-' + c).textContent = data.count || 0;
+                      document.getElementById('packages-' + c).textContent = data.packages || '';
+                  }
+              );
+          }
+
+          function statusAll() {
+              for (var i = 0; i < components.length; i++) {
+                  statusOne(components[i][0]);
+              }
+          }
+
+          function refreshAll() {
+              setMsg('<strong>正在更新软件列表...</strong>');
+              XHR.get(
+                  '<%=luci.dispatcher.build_url("admin/services/doornet2_app_update/refresh")%>',
+                  null,
+                  function(x, data) {
+                      data = data || {};
+                      setMsg('<strong>' + esc(data.message || (data.ok ? '检查完成' : '检查失败')) + '</strong>');
+                      statusAll();
+                  }
+              );
+          }
+
+          function upgradeOne(c, label) {
+              if (!confirm('确认在线更新 ' + label + '？')) return;
+
+              setMsg('<strong>正在更新 ' + esc(label) + '，请不要断电...</strong>');
+
+              XHR.get(
+                  '<%=luci.dispatcher.build_url("admin/services/doornet2_app_update/upgrade")%>',
+                  { component: c },
+                  function(x, data) {
+                      data = data || {};
+                      setMsg('<strong>' + esc(data.message || (data.ok ? '完成' : '失败')) + '</strong>');
+                      setTimeout(function() { statusOne(c); }, 2500);
+                  }
+              );
+          }
+
+          initRows();
+          statusAll();
+          </script>
+
+          <%+footer%>
+          EOF
+
+          echo "===== NETWORK APPS ONLINE UPDATER ====="
+          sh -n files/usr/bin/doornet2-app-updater
+          grep -nE \
+            'DoorNet2 组件在线升级|doornet2-app-updater' \
+            files/usr/lib/lua/luci/controller/doornet2_app_update.lua
+
+
+      # ============================================================
       # 13. Packages
       # ============================================================
 
@@ -2737,6 +3905,34 @@ jobs:
 
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
+
+          # PassWall (official Openwrt-Passwall feeds)
+          # Use nftables transparent proxy on firewall4 and keep the common
+          # userland cores in the firmware so later online package updates do
+          # not depend on third-party kernel modules.
+          # CONFIG_PACKAGE_dnsmasq is not set
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=y
+
+          # DNS acceleration / game acceleration / DNS filtering
+          # Installed by default but kept disabled on first boot to avoid
+          # DNS port conflicts until the user chooses a topology.
+          CONFIG_PACKAGE_smartdns=y
+          CONFIG_PACKAGE_luci-app-smartdns=y
+          CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
+          CONFIG_PACKAGE_uugamebooster=y
+          CONFIG_PACKAGE_luci-app-uugamebooster=y
+          CONFIG_PACKAGE_luci-i18n-uugamebooster-zh-cn=y
+          CONFIG_PACKAGE_adguardhome=y
 
           # iStoreOS-style QuickStart dashboard
           CONFIG_PACKAGE_quickstart=y
@@ -2800,6 +3996,40 @@ jobs:
           grep -nE \
             'fe320000|fe330000|verify_mmc_host_layout|verify_sysupgrade_target' \
             files/usr/bin/doornet2-updater
+
+          echo
+          echo "===== PASSWALL PACKAGES ====="
+
+          grep -E \
+            '^CONFIG_PACKAGE_(luci-app-passwall|luci-i18n-passwall-zh-cn|dnsmasq-full)=y$' \
+            .config || true
+
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
+          grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config
+
+          test -x files/usr/bin/doornet2-passwall-updater
+
+          echo
+          echo "===== NETWORK APPS ====="
+
+          grep -E \
+            '^CONFIG_PACKAGE_(smartdns|luci-app-smartdns|uugamebooster|luci-app-uugamebooster|adguardhome)=y$' \
+            .config || true
+
+          grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
+          grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
+          grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
+
+          test -x files/usr/bin/doornet2-app-updater
+          sh -n files/usr/bin/doornet2-app-updater
+          test -x files/etc/uci-defaults/97-doornet2-network-apps
+          sh -n files/etc/uci-defaults/97-doornet2-network-apps
 
           echo
           echo "===== R23 UI PACKAGES ====="
@@ -2944,7 +4174,8 @@ jobs:
             "emmc_controller": "fe330000.mmc",
             "extroot": false,
             "updater": "physical-target-guard-v2",
-            "tf_capacity": "preserve-expanded-root-v1"
+            "tf_capacity": "preserve-expanded-root-v1",
+            "network_apps": "passwall-smartdns-uu-adguard-online-v1"
           }
           EOF
 
@@ -2983,6 +4214,15 @@ jobs:
           - Expanded TF p2 partition table is preserved during sysupgrade
           - ext4 is automatically grown back to the existing TF p2 size
           - eMMC keeps the original Rockchip upgrade behaviour
+
+          Online-updatable network applications:
+
+          - PassWall proxy routing
+          - SmartDNS DNS acceleration
+          - NetEase UU Game Booster
+          - AdGuard Home
+          - Updates come from the DoorNet2 OPKG feed built by this workflow
+          - Kernel/kmod packages are never selected by the component updater
 
           SHA256:
 
@@ -3211,7 +4451,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R23 QuickStart/Argon build finished"
+          echo "DoorNet2 R24 iStoreOS visual + online apps build finished"
           echo "========================================"
 
           echo
@@ -3303,10 +4543,58 @@ jobs:
 
 
           echo
-          echo "===== R23 QUICKSTART / ARGON UI ====="
+          echo "===== PASSWALL ====="
 
           grep -q \
-            "DOORNET2_UI='quickstart-argon-v1'" \
+            "DOORNET2_PASSWALL='builtin-online-feed-v1'" \
+            files/etc/doornet2_release
+
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y$' .config
+          grep -q '^CONFIG_PACKAGE_dnsmasq-full=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config
+
+          test -f feeds/passwall_luci/luci-app-passwall/Makefile
+          test -d feeds/passwall_packages
+          test -x files/usr/bin/doornet2-passwall-updater
+          sh -n files/usr/bin/doornet2-passwall-updater
+
+          grep -q 'doornet2_passwall_luci' files/etc/opkg/distfeeds.conf
+          grep -q 'doornet2_passwall_packages' files/etc/opkg/distfeeds.conf
+
+          echo
+          echo "===== ONLINE NETWORK APPS ====="
+
+          grep -q \
+            "DOORNET2_NETWORK_APPS='smartdns-uu-adguard-online-v1'" \
+            files/etc/doornet2_release
+
+          grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
+          grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
+          grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
+
+          test -x files/usr/bin/doornet2-app-updater
+          sh -n files/usr/bin/doornet2-app-updater
+
+          test -x files/etc/uci-defaults/97-doornet2-network-apps
+          sh -n files/etc/uci-defaults/97-doornet2-network-apps
+
+          grep -q 'doornet2_istore_packages' files/etc/opkg/distfeeds.conf
+
+          grep -nE \
+            'smartdns|uugamebooster|adguardhome|luci-app-smartdns|luci-app-uugamebooster' \
+            .config \
+            | head -40
+
+          echo
+          echo "===== R24 ISTOREOS VISUAL UI ====="
+
+          grep -q \
+            "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
@@ -3329,6 +4617,29 @@ jobs:
           grep -nE \
             "mediaurlbase|lang='zh_cn'" \
             files/etc/uci-defaults/95-doornet2-ui
+
+          grep -q \
+            "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
+            files/etc/doornet2_release
+
+          test -s \
+            files/www/luci-static/doornet2/istoreos-dark.css
+
+          test -x \
+            files/etc/uci-defaults/96-doornet2-istoreos-visual
+
+          grep -q 'var(--dn-card)' \
+            files/www/luci-static/doornet2/istoreos-dark.css
+
+          grep -Rqs 'luci-static/doornet2/istoreos-dark.css' \
+            package/lean/luci-theme-argon/ucode/template/themes/argon \
+            package/lean/luci-theme-argon/luasrc/view/themes/argon 2>/dev/null
+
+          grep -q "mode='dark'" \
+            files/etc/uci-defaults/96-doornet2-istoreos-visual
+
+          grep -q "dark_primary='#6574e8'" \
+            files/etc/uci-defaults/96-doornet2-istoreos-visual
 
 
           echo
@@ -3355,5 +4666,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R23 QUICKSTART + ARGON + CAPACITY PATCH SUCCESS"
+          echo "R24 ISTOREOS VISUAL + ONLINE APPS + CAPACITY PATCH SUCCESS"
           echo "========================================"
