@@ -143,7 +143,7 @@ jobs:
 
 
       # ============================================================
-      # 4. iStore
+      # 4. iStore + iStoreOS-style QuickStart UI
       # ============================================================
 
       - name: Add iStore feed
@@ -157,7 +157,7 @@ jobs:
           cat feeds.conf.default
 
 
-      - name: Update feeds
+      - name: Update base feeds
         run: |
           set -e
 
@@ -168,6 +168,93 @@ jobs:
             -d y \
             -p istore \
             luci-app-store
+
+
+      - name: Add QuickStart feeds and Argon UI
+        run: |
+          set -e
+
+          echo "===== ADD QUICKSTART FEEDS ====="
+
+          grep -q '^src-git nas ' feeds.conf.default || \
+            echo 'src-git nas https://github.com/linkease/nas-packages.git;master' \
+            >> feeds.conf.default
+
+          grep -q '^src-git nas_luci ' feeds.conf.default || \
+            echo 'src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main' \
+            >> feeds.conf.default
+
+          ./scripts/feeds update nas nas_luci
+
+          ./scripts/feeds install \
+            -d y \
+            -p nas \
+            quickstart
+
+          ./scripts/feeds install \
+            -d y \
+            -p nas_luci \
+            luci-app-quickstart
+
+          echo "===== ADD ARGON THEME ====="
+
+          mkdir -p package/lean
+
+          rm -rf \
+            package/lean/luci-theme-argon \
+            package/lean/luci-app-argon-config
+
+          git clone \
+            --depth 1 \
+            https://github.com/jerrykuku/luci-theme-argon.git \
+            package/lean/luci-theme-argon
+
+          git clone \
+            --depth 1 \
+            https://github.com/jerrykuku/luci-app-argon-config.git \
+            package/lean/luci-app-argon-config
+
+          echo "===== QUICKSTART / ARGON SOURCES ====="
+
+          test -f feeds/nas/network/services/quickstart/Makefile
+          test -f feeds/nas_luci/luci/luci-app-quickstart/Makefile
+          test -f package/lean/luci-theme-argon/Makefile
+          test -f package/lean/luci-app-argon-config/Makefile
+
+          grep -nE \
+            'PKG_NAME:=quickstart|PKG_VERSION|DEPENDS' \
+            feeds/nas/network/services/quickstart/Makefile \
+            | head -20
+
+          grep -nE \
+            'LUCI_TITLE|LUCI_DEPENDS|PKG_VERSION' \
+            feeds/nas_luci/luci/luci-app-quickstart/Makefile
+
+
+      - name: Configure DoorNet2 UI defaults
+        run: |
+          set -e
+
+          mkdir -p files/etc/uci-defaults
+
+          cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
+          #!/bin/sh
+
+          # DoorNet2 R23 UI defaults
+          # Keep Bootstrap installed as a recovery theme, but use Argon by default.
+
+          if uci -q get luci.main >/dev/null 2>&1; then
+              uci -q set luci.main.mediaurlbase='/luci-static/argon'
+              uci -q set luci.main.lang='zh_cn'
+              uci -q commit luci
+          fi
+
+          exit 0
+          EOF
+
+          chmod 755 files/etc/uci-defaults/95-doornet2-ui
+
+          cat files/etc/uci-defaults/95-doornet2-ui
 
 
       # ============================================================
@@ -476,6 +563,7 @@ jobs:
           DOORNET2_MMC_LAYOUT='mmcblk0-tf-mmcblk1-emmc'
           DOORNET2_UPDATER='physical-target-guard-v2'
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
+          DOORNET2_UI='quickstart-argon-v1'
           EOF
 
           cat files/etc/doornet2_release
@@ -2650,6 +2738,16 @@ jobs:
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-compat=y
 
+          # iStoreOS-style QuickStart dashboard
+          CONFIG_PACKAGE_quickstart=y
+          CONFIG_PACKAGE_luci-app-quickstart=y
+          CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
+
+          # Argon theme, while Bootstrap remains installed as fallback
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_luci-app-argon-config=y
+
           CONFIG_PACKAGE_curl=y
           CONFIG_PACKAGE_ca-bundle=y
           CONFIG_PACKAGE_ca-certificates=y
@@ -2702,6 +2800,20 @@ jobs:
           grep -nE \
             'fe320000|fe330000|verify_mmc_host_layout|verify_sysupgrade_target' \
             files/usr/bin/doornet2-updater
+
+          echo
+          echo "===== R23 UI PACKAGES ====="
+
+          grep -E \
+            '^CONFIG_PACKAGE_(quickstart|luci-app-quickstart|luci-i18n-quickstart-zh-cn|luci-theme-bootstrap|luci-theme-argon|luci-app-argon-config)=y$' \
+            .config || true
+
+          grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
+
+          test -x files/etc/uci-defaults/95-doornet2-ui
 
 
       # ============================================================
@@ -3099,7 +3211,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R21-capable build finished"
+          echo "DoorNet2 R23 QuickStart/Argon build finished"
           echo "========================================"
 
           echo
@@ -3191,6 +3303,35 @@ jobs:
 
 
           echo
+          echo "===== R23 QUICKSTART / ARGON UI ====="
+
+          grep -q \
+            "DOORNET2_UI='quickstart-argon-v1'" \
+            files/etc/doornet2_release
+
+          grep -q '^CONFIG_PACKAGE_quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-app-argon-config=y$' .config
+
+          test -f \
+            feeds/nas/network/services/quickstart/Makefile
+
+          test -f \
+            feeds/nas_luci/luci/luci-app-quickstart/Makefile
+
+          test -f \
+            package/lean/luci-theme-argon/Makefile
+
+          test -x \
+            files/etc/uci-defaults/95-doornet2-ui
+
+          grep -nE \
+            "mediaurlbase|lang='zh_cn'" \
+            files/etc/uci-defaults/95-doornet2-ui
+
+
+          echo
           echo "===== EXTROOT ====="
 
           cat files/etc/config/fstab
@@ -3214,5 +3355,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R21 CAPACITY PATCH SUCCESS"
+          echo "R23 QUICKSTART + ARGON + CAPACITY PATCH SUCCESS"
           echo "========================================"
