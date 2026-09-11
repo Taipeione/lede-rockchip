@@ -1,0 +1,22 @@
+Package: luci-app-quickstart
+Version: 0.12.10-r1
+Depends: libc, quickstart, luci-app-store
+Section: luci
+Architecture: all
+Installed-Size: 408115
+Filename: luci-app-quickstart_0.12.10-r1_all.ipk
+Size: 408885
+SHA256sum: 0091d7b7338da48139b39b6364a9389a6b906a68550ea3e44ec95091c609b249
+Description:  LuCI support for quickstart 
+
+Package: luci-i18n-quickstart-zh-cn
+Version: 0.12.10-r1
+Depends: libc, luci-app-quickstart
+Section: luci
+Architecture: all
+Installed-Size: 521
+Filename: luci-i18n-quickstart-zh-cn_0.12.10-r1_all.ipk
+Size: 1338
+SHA256sum: 877cf5abfc49e3bd3d6322bd9f992064a89125252115accc0963f277e7e4ca51
+Description:  Translation for luci-app-quickstart - 简体中文 (Simplified Chinese)
+

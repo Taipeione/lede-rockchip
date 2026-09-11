@@ -1,0 +1,14 @@
+Package: quickstart
+Version: 0.13.0-1
+Depends: libc, shadow-utils, shadow-useradd, mount-utils, block-mount, lsblk, e2fsprogs, parted, smartmontools, smartd, smartmontools-drivedb, mdadm, ip-full, ubus, uci, bash
+Source: feeds/nas/network/services/quickstart
+SourceName: quickstart
+Section: net
+SourceDateEpoch: 1789043539
+Architecture: aarch64_generic
+Installed-Size: 4590705
+Filename: quickstart_0.13.0-1_aarch64_generic.ipk
+Size: 4580359
+SHA256sum: 65b0b0931fad5d32272d0d01d9908f13893fe9231ea2db8498fadb7701b194ea
+Description:  Quickstart is a dashboard & user guide
+
