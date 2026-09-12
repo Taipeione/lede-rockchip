@@ -330,7 +330,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R27 UI defaults
+          # DoorNet2 R28 UI defaults
           # Keep Bootstrap installed as a recovery theme, but use Argon by default.
 
           if uci -q get luci.main >/dev/null 2>&1; then
@@ -712,7 +712,7 @@ jobs:
           print('brand templates patched:', patched_brand)
           PY2
 
-          # Force dark mode and iStoreOS-like accent on every R27 first boot.
+          # Force dark mode and iStoreOS-like accent on every R28 first boot.
           cat > files/etc/uci-defaults/96-doornet2-istoreos-visual <<'EOF'
           #!/bin/sh
 
@@ -739,7 +739,7 @@ jobs:
 
           chmod 755 files/etc/uci-defaults/96-doornet2-istoreos-visual
 
-          echo "===== R27 VISUAL FILES ====="
+          echo "===== R28 VISUAL FILES ====="
           test -s files/www/luci-static/doornet2/istoreos-dark.css
           test -x files/etc/uci-defaults/96-doornet2-istoreos-visual
           grep -nE 'DoorNet2|dn-bg|dn-card|quickstart' \
@@ -749,7 +749,7 @@ jobs:
             files/etc/uci-defaults/96-doornet2-istoreos-visual
 
       # ============================================================
-      # 4A. R27 runtime monitor
+      # 4A. R28 runtime monitor
       #
       # Adds a lightweight top-right status badge to LuCI:
       #   - RK3399 CPU/SoC temperature
@@ -763,7 +763,7 @@ jobs:
         run: |
           set -e
 
-          echo "===== ADD DOORNET2 R27 RUNTIME MONITOR ====="
+          echo "===== ADD DOORNET2 R28 RUNTIME MONITOR ====="
 
           mkdir -p \
             files/usr/bin \
@@ -958,7 +958,7 @@ jobs:
 
           cat >> files/www/luci-static/doornet2/istoreos-dark.css <<'EOF'
 
-          /* ---------- DoorNet2 R27 runtime monitor ---------- */
+          /* ---------- DoorNet2 R28 runtime monitor ---------- */
           #dn-runtime-monitor {
             position: fixed;
             top: 11px;
@@ -1091,7 +1091,7 @@ jobs:
           chmod 755 files/etc/uci-defaults/98-doornet2-time
           sh -n files/etc/uci-defaults/98-doornet2-time
 
-          echo "===== R27 RUNTIME MONITOR FILES ====="
+          echo "===== R28 RUNTIME MONITOR FILES ====="
           test -x files/usr/bin/doornet2-runtime-status
           test -s files/usr/lib/lua/luci/controller/doornet2_runtime.lua
           test -s files/www/luci-static/doornet2/runtime-monitor.js
@@ -3586,7 +3586,7 @@ jobs:
 
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
-          FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|shadowsocksr-libev-|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
+          FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
 
           json_escape()
           {
@@ -3873,7 +3873,7 @@ jobs:
                       LABEL='PassWall 代理分流'
                       MAIN='luci-app-passwall'
                       SERVICE='passwall'
-                      FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|shadowsocksr-libev-|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
+                      FILTER='^(luci-app-passwall|luci-i18n-passwall-|chinadns-ng|dns2socks|haproxy|hysteria|ipt2socks|microsocks|naiveproxy|shadow-tls|simple-obfs|sing-box|tcping|v2ray-geoip|v2ray-geosite|v2ray-plugin|xray-core|xray-plugin)$'
                       ;;
                   smartdns)
                       LABEL='SmartDNS DNS 加速'
@@ -4278,7 +4278,11 @@ jobs:
           # Xray and Sing-box remain enabled and can handle modern proxy nodes.
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
           # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
+          # Legacy ShadowsocksR libev client is also disabled on DoorNet2.
+          # Current PassWall feed package shadowsocksr-libev 2.5.6 reaches the
+          # build stage without a generated Makefile on this legacy LEDE tree.
+          # Xray and Sing-box remain enabled for the actual proxy workloads.
+          # CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=y
 
@@ -4371,10 +4375,17 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set$' .config
 
           if grep -Eq '^CONFIG_PACKAGE_shadowsocks-rust-.*=y$' .config; then
               echo 'ERROR: shadowsocks-rust unexpectedly selected; refusing to start a Rust host build.'
               grep -E '^CONFIG_PACKAGE_shadowsocks-rust-.*=y$' .config || true
+              exit 1
+          fi
+
+          if grep -Eq '^CONFIG_PACKAGE_shadowsocksr-libev.*=y$' .config; then
+              echo 'ERROR: shadowsocksr-libev unexpectedly selected; refusing to start the known-broken legacy SSR build.'
+              grep -E '^CONFIG_PACKAGE_shadowsocksr-libev.*=y$' .config || true
               exit 1
           fi
 
@@ -4818,7 +4829,7 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "DoorNet2 R27 iStoreOS visual + online apps + runtime monitor build finished"
+          echo "DoorNet2 R28 iStoreOS visual + online apps + runtime monitor build finished"
           echo "========================================"
 
           echo
@@ -4958,7 +4969,7 @@ jobs:
             | head -40
 
           echo
-          echo "===== R27 ISTOREOS VISUAL UI ====="
+          echo "===== R28 ISTOREOS VISUAL UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
@@ -5010,7 +5021,7 @@ jobs:
 
 
           echo
-          echo "===== R27 RUNTIME MONITOR ====="
+          echo "===== R28 RUNTIME MONITOR ====="
 
           grep -q \
             "DOORNET2_RUNTIME_MONITOR='thermal-time-v1'" \
@@ -5018,7 +5029,9 @@ jobs:
 
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set$' .config
           grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set$' .config
+          grep -q '^# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set$' .config
           ! grep -Eq '^CONFIG_PACKAGE_shadowsocks-rust-.*=y$' .config
+          ! grep -Eq '^CONFIG_PACKAGE_shadowsocksr-libev.*=y$' .config
 
           test -x files/usr/bin/doornet2-runtime-status
           sh -n files/usr/bin/doornet2-runtime-status
@@ -5068,5 +5081,5 @@ jobs:
 
           echo
           echo "========================================"
-          echo "R27 ISTOREOS VISUAL + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
+          echo "R28 ISTOREOS VISUAL + ONLINE APPS + RUNTIME MONITOR + CAPACITY PATCH SUCCESS"
           echo "========================================"
