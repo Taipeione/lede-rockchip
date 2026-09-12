@@ -354,7 +354,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R28 UI defaults
+          # DoorNet2 R30 UI defaults
           # Keep Bootstrap installed as a recovery theme, but use Argon by default.
 
           if uci -q get luci.main >/dev/null 2>&1; then
@@ -4318,7 +4318,8 @@ jobs:
           # UU: LuCI-only runtime downloader. Do not select the legacy
           # uugamebooster binary package because its fixed build-time download
           # URL currently returns HTTP 403.
-          # CONFIG_PACKAGE_uugamebooster is not set
+          # Legacy uugamebooster binary package is intentionally absent from
+          # the active package tree; only the LuCI runtime-downloader is selected.
           CONFIG_PACKAGE_luci-app-uugamebooster=y
           CONFIG_PACKAGE_adguardhome=y
 
@@ -4425,15 +4426,23 @@ jobs:
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
-          grep -q '^# CONFIG_PACKAGE_uugamebooster is not set$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
           grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
 
-          if [ -e package/feeds/packages/uugamebooster ] || \
-             grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
-              echo 'ERROR: legacy fixed-download uugamebooster package is active.'
+          # The old UU package symbol can disappear entirely after its active
+          # package link is removed. That is valid. Fail only if the old binary
+          # package is actually selected or its active package link still exists.
+          if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
+              echo 'ERROR: legacy fixed-download uugamebooster package is selected.'
               exit 1
           fi
+
+          if [ -e package/feeds/packages/uugamebooster ]; then
+              echo 'ERROR: legacy fixed-download uugamebooster package link is still active.'
+              exit 1
+          fi
+
+          echo 'legacy uugamebooster: absent/not selected (OK)'
 
           test -f package/doornet2/luci-app-uugamebooster/Makefile
           grep -q 'PKG_NAME:=luci-app-uugamebooster' \
@@ -4473,7 +4482,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R29 guard: the obsolete fixed-download UU package must not appear
+          # R30 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -5015,10 +5024,15 @@ jobs:
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
-          grep -q '^# CONFIG_PACKAGE_uugamebooster is not set$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
           grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
 
+          if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
+              echo 'ERROR: legacy fixed-download uugamebooster unexpectedly selected in final config.'
+              exit 1
+          fi
+
+          test ! -e package/feeds/packages/uugamebooster
           test -f package/doornet2/luci-app-uugamebooster/Makefile
           grep -q 'PKG_NAME:=luci-app-uugamebooster' \
             package/doornet2/luci-app-uugamebooster/Makefile
@@ -5050,7 +5064,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R29 ISTOREOS VISUAL UI ====="
+          echo "===== R30 ISTOREOS VISUAL UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
