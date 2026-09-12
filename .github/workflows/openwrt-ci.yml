@@ -214,50 +214,74 @@ jobs:
         run: |
           set -e
 
-          echo "===== ADD ISTORE NETWORK APP FEED ====="
+          echo "===== SMARTDNS / ADGUARD FROM NORMAL FEEDS ====="
 
-          # LinkEase's curated iStore package set contains SmartDNS and
-          # NetEase UU Game Booster packages that match the iStoreOS ecosystem.
-          sed -i \
-            -e '/^src-git istore_packages /d' \
-            feeds.conf.default
-
-          echo 'src-git istore_packages https://github.com/linkease/istore-packages.git;main' \
-            >> feeds.conf.default
-
-          ./scripts/feeds update istore_packages
-
-          # Force these package names to come from the curated iStore package
-          # feed instead of any older duplicate in the normal feeds.
-          ./scripts/feeds install \
-            -d y \
-            -f \
-            -p istore_packages \
-            smartdns \
-            luci-app-smartdns \
-            uugamebooster \
-            luci-app-uugamebooster
-
-          # AdGuard Home is maintained in the normal OpenWrt packages feed.
+          # Use the packages already matched to this LEDE tree for SmartDNS and
+          # AdGuard Home. Avoid a second duplicate package feed here.
           ./scripts/feeds install \
             -d y \
             -f \
             -p packages \
+            smartdns \
             adguardhome
+
+          ./scripts/feeds install \
+            -d y \
+            -f \
+            -p luci \
+            luci-app-smartdns
+
+          echo "===== REPLACE LEGACY UU WITH RUNTIME-DOWNLOAD LUCI PLUGIN ====="
+
+          # The legacy uugamebooster package downloads a fixed NetEase tarball
+          # during firmware compilation. NetEase currently returns HTTP 403 for
+          # that old URL, which aborts the entire image build.
+          #
+          # DoorNet2 instead ships the modern LuCI-only plugin. It does not
+          # bundle or download the UU binary at build time; when enabled on the
+          # router it asks NetEase for the current aarch64 plugin and downloads
+          # it at runtime. This also keeps UU binary updates independent from
+          # firmware compilation.
+          rm -rf \
+            package/feeds/packages/uugamebooster \
+            package/feeds/luci/luci-app-uugamebooster \
+            package/feeds/istore_packages/uugamebooster \
+            package/feeds/istore_packages/luci-app-uugamebooster \
+            package/lean/uugamebooster \
+            package/lean/luci-app-uugamebooster \
+            package/doornet2/luci-app-uugamebooster
+
+          mkdir -p package/doornet2
+
+          TMP_UU="$(mktemp -d)"
+          git clone \
+            --depth 1 \
+            https://github.com/lmq8267/luci-app-uugamebooster.git \
+            "$TMP_UU/src"
+
+          test -f "$TMP_UU/src/luci-app-uugamebooster/Makefile"
+
+          cp -a \
+            "$TMP_UU/src/luci-app-uugamebooster" \
+            package/doornet2/luci-app-uugamebooster
+
+          rm -rf "$TMP_UU"
 
           echo "===== VERIFY NETWORK APP SOURCES ====="
 
-          ./scripts/feeds search -r '^smartdns$' | head -20 || true
-          ./scripts/feeds search -r '^luci-app-smartdns$' | head -20 || true
-          ./scripts/feeds search -r '^uugamebooster$' | head -20 || true
-          ./scripts/feeds search -r '^luci-app-uugamebooster$' | head -20 || true
-          ./scripts/feeds search -r '^adguardhome$' | head -20 || true
-
-          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/smartdns/Makefile' -print -quit)"
-          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/luci-app-smartdns/Makefile' -print -quit)"
-          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/uugamebooster/Makefile' -print -quit)"
-          test -n "$(find feeds/istore_packages -type f -name Makefile -path '*/luci-app-uugamebooster/Makefile' -print -quit)"
+          test -n "$(find feeds/packages -type f -name Makefile -path '*/smartdns/Makefile' -print -quit)"
+          test -n "$(find feeds/luci -type f -name Makefile -path '*/luci-app-smartdns/Makefile' -print -quit)"
           test -n "$(find feeds/packages -type f -name Makefile -path '*/adguardhome/Makefile' -print -quit)"
+          test -f package/doornet2/luci-app-uugamebooster/Makefile
+
+          grep -nE \
+            'PKG_NAME:=luci-app-uugamebooster|PKG_VERSION|LUCI_DEPENDS' \
+            package/doornet2/luci-app-uugamebooster/Makefile
+
+          # The fixed-download legacy UU package must not be linked into the
+          # active package tree anymore.
+          test ! -e package/feeds/packages/uugamebooster
+          test ! -e package/feeds/luci/luci-app-uugamebooster
 
 
       - name: Add QuickStart feeds and Argon UI
@@ -361,7 +385,7 @@ jobs:
           # so enabling them blindly may cause a port-53 conflict.
           # Configure the desired topology in LuCI first, then enable services.
 
-          for svc in smartdns adguardhome uugamebooster; do
+          for svc in smartdns adguardhome uuplugin; do
               if [ -x "/etc/init.d/$svc" ]; then
                   "/etc/init.d/$svc" disable >/dev/null 2>&1 || true
                   "/etc/init.d/$svc" stop >/dev/null 2>&1 || true
@@ -1385,7 +1409,6 @@ jobs:
           src/gz openwrt_telephony https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/telephony
           src/gz doornet2_passwall_luci https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/passwall_luci
           src/gz doornet2_passwall_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/passwall_packages
-          src/gz doornet2_istore_packages https://raw.githubusercontent.com/Taipeione/lede-rockchip/opkg-feed/packages/aarch64_generic/istore_packages
           EOF
 
 
@@ -1413,7 +1436,7 @@ jobs:
           DOORNET2_TF_CAPACITY='preserve-expanded-root-v1'
           DOORNET2_UI='quickstart-istoreos-dark-v2'
           DOORNET2_PASSWALL='builtin-online-feed-v1'
-          DOORNET2_NETWORK_APPS='smartdns-uu-adguard-online-v1'
+          DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'
           DOORNET2_RUNTIME_MONITOR='thermal-time-v1'
           EOF
 
@@ -3884,8 +3907,8 @@ jobs:
                   uu)
                       LABEL='网易 UU 游戏加速器'
                       MAIN='luci-app-uugamebooster'
-                      SERVICE='uugamebooster'
-                      FILTER='^(uugamebooster|luci-app-uugamebooster|luci-i18n-uugamebooster-.*)$'
+                      SERVICE='uuplugin'
+                      FILTER='^(luci-app-uugamebooster)$'
                       ;;
                   adguard)
                       LABEL='AdGuard Home'
@@ -4292,9 +4315,11 @@ jobs:
           CONFIG_PACKAGE_smartdns=y
           CONFIG_PACKAGE_luci-app-smartdns=y
           CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=y
-          CONFIG_PACKAGE_uugamebooster=y
+          # UU: LuCI-only runtime downloader. Do not select the legacy
+          # uugamebooster binary package because its fixed build-time download
+          # URL currently returns HTTP 403.
+          # CONFIG_PACKAGE_uugamebooster is not set
           CONFIG_PACKAGE_luci-app-uugamebooster=y
-          CONFIG_PACKAGE_luci-i18n-uugamebooster-zh-cn=y
           CONFIG_PACKAGE_adguardhome=y
 
           # iStoreOS-style QuickStart dashboard
@@ -4395,14 +4420,24 @@ jobs:
           echo "===== NETWORK APPS ====="
 
           grep -E \
-            '^CONFIG_PACKAGE_(smartdns|luci-app-smartdns|uugamebooster|luci-app-uugamebooster|adguardhome)=y$' \
+            '^CONFIG_PACKAGE_(smartdns|luci-app-smartdns|luci-app-uugamebooster|adguardhome)=y$' \
             .config || true
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
-          grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config
+          grep -q '^# CONFIG_PACKAGE_uugamebooster is not set$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
           grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
+
+          if [ -e package/feeds/packages/uugamebooster ] || \
+             grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
+              echo 'ERROR: legacy fixed-download uugamebooster package is active.'
+              exit 1
+          fi
+
+          test -f package/doornet2/luci-app-uugamebooster/Makefile
+          grep -q 'PKG_NAME:=luci-app-uugamebooster' \
+            package/doornet2/luci-app-uugamebooster/Makefile
 
           test -x files/usr/bin/doornet2-app-updater
           sh -n files/usr/bin/doornet2-app-updater
@@ -4437,6 +4472,35 @@ jobs:
           find dl \
             -size -1024c \
             -exec rm -f {} \;
+
+          # R29 guard: the obsolete fixed-download UU package must not appear
+          # anywhere in the selected download plan.
+          if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
+              echo "ERROR: legacy uugamebooster package unexpectedly selected."
+              exit 1
+          fi
+
+
+      - name: Preflight critical optional packages
+        run: |
+          set -e
+
+          echo "===== PREFLIGHT MODERN UU LUCI PLUGIN ====="
+          make package/doornet2/luci-app-uugamebooster/compile -j1 V=s
+
+          test -n "$(
+            find ./bin \
+              -type f \
+              -name 'luci-app-uugamebooster_*.ipk' \
+              -print \
+              -quit
+          )"
+
+          echo "===== PREFLIGHT PASSWALL V2RAY PLUGIN ====="
+          # R28's parallel first pass briefly reported v2ray-plugin before the
+          # serial retry continued. Build it once serially up front to remove
+          # that race from the later full-world build.
+          make package/feeds/passwall_packages/v2ray-plugin/compile -j1 V=s
 
 
       # ============================================================
@@ -4553,7 +4617,7 @@ jobs:
             "extroot": false,
             "updater": "physical-target-guard-v2",
             "tf_capacity": "preserve-expanded-root-v1",
-            "network_apps": "passwall-smartdns-uu-adguard-online-v1"
+            "network_apps": "passwall-smartdns-uu-runtime-adguard-online-v2"
           }
           EOF
 
@@ -4946,14 +5010,18 @@ jobs:
           echo "===== ONLINE NETWORK APPS ====="
 
           grep -q \
-            "DOORNET2_NETWORK_APPS='smartdns-uu-adguard-online-v1'" \
+            "DOORNET2_NETWORK_APPS='smartdns-uu-runtime-adguard-online-v2'" \
             files/etc/doornet2_release
 
           grep -q '^CONFIG_PACKAGE_smartdns=y$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-smartdns=y$' .config
-          grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config
+          grep -q '^# CONFIG_PACKAGE_uugamebooster is not set$' .config
           grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
           grep -q '^CONFIG_PACKAGE_adguardhome=y$' .config
+
+          test -f package/doornet2/luci-app-uugamebooster/Makefile
+          grep -q 'PKG_NAME:=luci-app-uugamebooster' \
+            package/doornet2/luci-app-uugamebooster/Makefile
 
           test -x files/usr/bin/doornet2-app-updater
           sh -n files/usr/bin/doornet2-app-updater
@@ -4961,15 +5029,28 @@ jobs:
           test -x files/etc/uci-defaults/97-doornet2-network-apps
           sh -n files/etc/uci-defaults/97-doornet2-network-apps
 
-          grep -q 'doornet2_istore_packages' files/etc/opkg/distfeeds.conf
-
           grep -nE \
-            'smartdns|uugamebooster|adguardhome|luci-app-smartdns|luci-app-uugamebooster' \
+            'smartdns|adguardhome|luci-app-smartdns|luci-app-uugamebooster' \
             .config \
             | head -40
 
+          UU_IPK="$(
+            find ./bin \
+              -type f \
+              -name 'luci-app-uugamebooster_*.ipk' \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$UU_IPK" ]; then
+              echo "ERROR: modern UU LuCI package was not generated."
+              exit 1
+          fi
+
+          echo "UU package: $UU_IPK"
+
           echo
-          echo "===== R28 ISTOREOS VISUAL UI ====="
+          echo "===== R29 ISTOREOS VISUAL UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
