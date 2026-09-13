@@ -354,7 +354,7 @@ jobs:
           cat > files/etc/uci-defaults/95-doornet2-ui <<'EOF'
           #!/bin/sh
 
-          # DoorNet2 R30 UI defaults
+          # DoorNet2 R31 UI defaults
           # Keep Bootstrap installed as a recovery theme, but use Argon by default.
 
           if uci -q get luci.main >/dev/null 2>&1; then
@@ -4482,7 +4482,7 @@ jobs:
             -size -1024c \
             -exec rm -f {} \;
 
-          # R30 guard: the obsolete fixed-download UU package must not appear
+          # R31 guard: the obsolete fixed-download UU package must not appear
           # anywhere in the selected download plan.
           if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
               echo "ERROR: legacy uugamebooster package unexpectedly selected."
@@ -4490,26 +4490,36 @@ jobs:
           fi
 
 
-      - name: Preflight critical optional packages
+      - name: Preflight package selection sanity checks
         run: |
           set -e
 
           echo "===== PREFLIGHT MODERN UU LUCI PLUGIN ====="
-          make package/doornet2/luci-app-uugamebooster/compile -j1 V=s
+          # Do NOT compile an individual target package on a clean tree here.
+          # The target libc/toolchain staging area is populated by the normal
+          # OpenWrt world build. Compiling luci-app-uugamebooster directly at
+          # this point can make package/libs/toolchain run before target libc is
+          # staged, producing a false failure such as:
+          #   cp: cannot stat staging_dir/target-*/lib/libc*.so*
+          # Keep this preflight static and let the normal firmware build resolve
+          # target dependencies in the correct order.
+          test -f package/doornet2/luci-app-uugamebooster/Makefile
+          grep -q 'PKG_NAME:=luci-app-uugamebooster' \
+            package/doornet2/luci-app-uugamebooster/Makefile
+          grep -q '^CONFIG_PACKAGE_luci-app-uugamebooster=y$' .config
 
-          test -n "$(
-            find ./bin \
-              -type f \
-              -name 'luci-app-uugamebooster_*.ipk' \
-              -print \
-              -quit
-          )"
+          if grep -q '^CONFIG_PACKAGE_uugamebooster=y$' .config; then
+              echo "ERROR: legacy fixed-download uugamebooster package is selected."
+              exit 1
+          fi
+
+          test ! -e package/feeds/packages/uugamebooster
+          echo "modern UU LuCI plugin selected; legacy UU binary absent (OK)"
 
           echo "===== PREFLIGHT PASSWALL V2RAY PLUGIN ====="
-          # R28's parallel first pass briefly reported v2ray-plugin before the
-          # serial retry continued. Build it once serially up front to remove
-          # that race from the later full-world build.
-          make package/feeds/passwall_packages/v2ray-plugin/compile -j1 V=s
+          test -f feeds/passwall_packages/v2ray-plugin/Makefile
+          grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=y$' .config
+          echo "v2ray-plugin source and PassWall selection present (OK)"
 
 
       # ============================================================
@@ -5064,7 +5074,7 @@ jobs:
           echo "UU package: $UU_IPK"
 
           echo
-          echo "===== R30 ISTOREOS VISUAL UI ====="
+          echo "===== R31 ISTOREOS VISUAL UI ====="
 
           grep -q \
             "DOORNET2_UI='quickstart-istoreos-dark-v2'" \
