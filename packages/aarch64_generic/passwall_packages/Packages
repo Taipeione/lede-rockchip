@@ -1,0 +1,76 @@
+Package: chinadns-ng
+Version: 2025.08.09-1
+Depends: libc
+License: AGPL-3.0-only
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 287136
+Filename: chinadns-ng_2025.08.09-1_aarch64_generic.ipk
+Size: 287115
+SHA256sum: 3f3d994d1704a0b4b3fd4b2f4368cfaba69eba7b6a29f928b3ce1252958200f4
+Description:  ChinaDNS next generation, refactoring with epoll and ipset.
+
+Package: dns2socks
+Version: 2.1-2
+Depends: libc, libpthread
+License: BSD-3-Clause
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 11260
+Filename: dns2socks_2.1-2_aarch64_generic.ipk
+Size: 11898
+SHA256sum: e81bf66c5025e8dd3f8e08d4dbaade1fd346f9df0c3e343c625dc8103c7a527d
+Description:  This is a command line utility to resolve DNS requests via
+ a SOCKS tunnel like Tor or a HTTP proxy.
+
+Package: ipt2socks
+Version: 1.1.4-3
+Depends: libc, libpthread
+License: AGPL-3.0
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 25987
+Filename: ipt2socks_1.1.4-3_aarch64_generic.ipk
+Size: 26574
+SHA256sum: 93ce6cb77814b36fac41226a5180bd02fa97889dc20e54790168e3087187f26e
+Description:  Utility for converting iptables (redirect/tproxy) to socks5.
+
+Package: microsocks
+Version: 1.0.5-2
+Depends: libc, libpthread
+License: MIT
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 8016
+Filename: microsocks_1.0.5-2_aarch64_generic.ipk
+Size: 8749
+SHA256sum: 1acc166ab0262718815025e8fee3e6bb113ece1e6fde4f87615932c322ad3b5e
+Description:  A SOCKS5 service that you can run on your remote boxes to tunnel connections
+ through them, if for some reason SSH doesn't cut it for you.
+ This version supports forwarding rules.
+
+Package: tcping
+Version: 0.3-1
+Depends: libc
+License: GPL-2.0-only
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 3710
+Filename: tcping_0.3-1_aarch64_generic.ipk
+Size: 4283
+SHA256sum: 3bfbb64bb3069c061b7d786bd8c4ca47c37b486f4773bfed773f72a30d20222c
+Description:  tcping measures the latency of a tcp-connection
+
+Package: xray-core
+Version: 25.1.30-1
+Depends: libc, ca-bundle
+License: MPL-2.0
+Section: net
+Architecture: aarch64_generic
+Installed-Size: 9862787
+Filename: xray-core_25.1.30-1_aarch64_generic.ipk
+Size: 9831782
+SHA256sum: 3678e6372fe9fb43d43e8826c0e1fee2a7804f7a9b199c8682adb521ec4e826f
+Description:  Xray, Penetrates Everything. It helps you to build your own computer network.
+ It secures your network connections and thus protects your privacy.
+
